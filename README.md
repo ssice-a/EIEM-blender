@@ -19,7 +19,7 @@ EIEM 的 Blender 作者工具。它读取 AnimeStudio 解包出的 EIEM 资源�
 - `eiem_blender_controls.py`：款式切换、形态键和生成 UI 的作者数据。
 - `eiem_physics_*.py`：物理作者工具、源数据和文件格式。
 
-开发目录建议使用 `E:\vscode\EIEM_Blender`。在 VS Code 中运行 **Blender: Start**，修改后运行 **Blender: Reload Addons**。不要同时安装旧版 ZIP 或单文件插件，否则 Blender 可能注册两份同名操作。
+开发目录为主工作区中的 `E:\vscode\EIEM\tools\Blender`。在 VS Code 中运行 **Blender: Start**，修改后运行 **Blender: Reload Addons**。不要同时安装旧版 ZIP 或单文件插件，否则 Blender 可能注册两份同名操作。
 
 ## 常用流程
 
