@@ -1,7 +1,7 @@
 bl_info = {
     "name": "EIEM Resource Package",
     "author": "EIEM",
-    "version": (0, 32, 0),
+    "version": (0, 33, 0),
     "blender": (3, 0, 0),
     "location": "File > Import/Export > EIEM package",
     "category": "Import-Export",
@@ -28,9 +28,19 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 from mathutils import Matrix, Quaternion, Vector
 
 if __package__:
+    from . import eiem_format as format_io
+    from . import eiem_lod as lod
     from . import eiem_physics_authoring as physics_authoring
     from . import eiem_blender_controls as controls
 else:
+    _format_spec = importlib.util.spec_from_file_location(
+        "eiem_format", Path(__file__).with_name("eiem_format.py"))
+    format_io = importlib.util.module_from_spec(_format_spec)
+    _format_spec.loader.exec_module(format_io)
+    _lod_spec = importlib.util.spec_from_file_location(
+        "eiem_lod", Path(__file__).with_name("eiem_lod.py"))
+    lod = importlib.util.module_from_spec(_lod_spec)
+    _lod_spec.loader.exec_module(lod)
     _physics_spec = importlib.util.spec_from_file_location(
         "eiem_physics_authoring", Path(__file__).with_name("eiem_physics_authoring.py"))
     physics_authoring = importlib.util.module_from_spec(_physics_spec)
@@ -74,231 +84,31 @@ lua_string = controls.lua_string
 generate_mod_ui = controls.generate_mod_ui
 
 
-# LOD is part of the imported resource identity, not Blender's display name.
-# Keep the pattern deliberately narrow so names such as "lodger" do not become
-# an invented game LOD.  The exporter exposes levels 0..4, while discovery can
-# still report an out-of-range level as unsupported metadata.
-LOD_TOKEN_RE = re.compile(r"(?<![a-z0-9])lod([0-9]+)(?![a-z0-9])", re.IGNORECASE)
-
-
-class _VariantData:
-    """Read-only metadata view over a Blender Mesh for one target LOD."""
-
-    def __init__(self, source, overrides):
-        self._source = source
-        self._overrides = dict(overrides)
-
-    def get(self, key, default=None):
-        if key in self._overrides:
-            return self._overrides[key]
-        return self._source.get(key, default)
-
-    def __getitem__(self, key):
-        if key in self._overrides:
-            return self._overrides[key]
-        return self._source[key]
-
-    def __contains__(self, key):
-        return key in self._overrides or key in self._source
-
-    def __getattr__(self, name):
-        return getattr(self._source, name)
-
-
-class _MeshExportVariant:
-    """Delegate Blender object data while exposing another LOD identity.
-
-    Export functions only read the object.  A view avoids mutating the .blend
-    and lets one authored template feed several concrete LOD resources.
-    """
-
-    def __init__(self, source, target_level, overrides, data_overrides):
-        self._source = source
-        self._target_level = target_level
-        self._overrides = dict(overrides)
-        self._data = _VariantData(source.data, data_overrides)
-        self.name = "%s_LOD%d" % (source.name, target_level)
-
-    @property
-    def data(self):
-        return self._data
-
-    def get(self, key, default=None):
-        if key in self._overrides:
-            return self._overrides[key]
-        return self._source.get(key, default)
-
-    def __getitem__(self, key):
-        if key in self._overrides:
-            return self._overrides[key]
-        return self._source[key]
-
-    def __contains__(self, key):
-        return key in self._overrides or key in self._source
-
-    def __getattr__(self, name):
-        return getattr(self._source, name)
-
-
-def _lod_values(obj):
-    values = [
-        obj.get("eiem_render_asset", ""),
-        obj.data.get("eiem_target_asset", ""),
-        obj.data.get("eiem_target_path", ""),
-        obj.data.get("eiem_source", ""),
-        obj.data.get("eiem_section", ""),
-        obj.get("eiem_render_section", ""),
-    ]
-    return [str(value).strip() for value in values if str(value).strip()]
-
-
-def mesh_lod_level(obj):
-    """Return the single LOD encoded by imported resource metadata."""
-    levels = {
-        int(match.group(1))
-        for value in _lod_values(obj)
-        for match in LOD_TOKEN_RE.finditer(value)
-    }
-    if len(levels) > 1:
-        raise ValueError("Mesh %s has inconsistent LOD metadata: %s" %
-                         (obj.name, ", ".join(str(value) for value in sorted(levels))))
-    return next(iter(levels), None)
-
-
-def _replace_lod(value, target_level):
-    value = str(value or "")
-    def replace(match):
-        token = match.group(0)
-        return token[:3] + str(int(target_level))
-    return LOD_TOKEN_RE.sub(replace, value)
-
-
-def mesh_lod_family(obj):
-    """Return a package-scoped identity with its LOD token normalized.
-
-    A game's LOD0 may be serialized in a dedicated ``.asset`` while later
-    levels live in a shared FBX.  The logical target asset is therefore the
-    stable family key; source path is only a fallback for legacy records that
-    have no asset identity.
-    """
-    package = str(obj.get("eiem_author_package", "")).replace("\\", "/").lower()
-    asset = str(obj.get("eiem_render_asset", "") or
-                obj.data.get("eiem_target_asset", obj.data.get("eiem_asset", "")))
-    source = str(obj.data.get("eiem_target_path", "") or
-                 obj.data.get("eiem_source", ""))
-    if asset.strip() and LOD_TOKEN_RE.search(asset):
-        return (package, "asset", LOD_TOKEN_RE.sub("{lod}", asset.lower()))
-    if source.strip():
-        return (package, "source", LOD_TOKEN_RE.sub("{lod}", source.replace("\\", "/").lower()))
-    return (package, "asset", asset.lower())
+# Keep the existing add-on scripting API while LOD policy lives in one module.
+LOD_TOKEN_RE = lod.LOD_TOKEN_RE
+mesh_lod_level = lod.mesh_lod_level
+mesh_lod_family = lod.mesh_lod_family
 
 
 def discover_mesh_lods(obj, candidates=None):
-    """Discover LODs actually imported for the same resource family."""
-    candidates = candidates if candidates is not None else bpy.data.objects
-    family = mesh_lod_family(obj)
-    levels = set()
-    for candidate in candidates:
-        if candidate.type != "MESH" or not candidate.data.get("eiem_section"):
-            continue
-        if mesh_lod_family(candidate) != family:
-            continue
-        level = mesh_lod_level(candidate)
-        if level is not None:
-            levels.add(level)
-    return levels
-
-
-def _lod_variant(obj, target_level, candidates):
-    source_level = mesh_lod_level(obj)
-    if source_level is None:
-        raise ValueError("Mesh %s has no LOD token to replicate" % obj.name)
-    observed = next((candidate for candidate in candidates
-                     if candidate.type == "MESH"
-                     and candidate.data.get("eiem_section")
-                     and mesh_lod_family(candidate) == mesh_lod_family(obj)
-                     and mesh_lod_level(candidate) == target_level), None)
-    object_overrides = {}
-    data_overrides = {}
-    metadata = observed or obj
-    for owner, key in ((object_overrides, "eiem_render_asset"),
-                       (object_overrides, "eiem_render_section"),
-                       (data_overrides, "eiem_section"),
-                       (data_overrides, "eiem_source"),
-                       (data_overrides, "eiem_asset"),
-                       (data_overrides, "eiem_target_path"),
-                       (data_overrides, "eiem_target_asset")):
-        current = (metadata.get(key, "") if owner is object_overrides else
-                   metadata.data.get(key, ""))
-        if str(current).strip():
-            owner[key] = (current if observed else
-                          _replace_lod(current, target_level))
-    return _MeshExportVariant(obj, target_level, object_overrides, data_overrides)
+    return lod.discover_mesh_lods(
+        obj, candidates if candidates is not None else bpy.data.objects)
 
 
 def expand_lod_plan(plan, target_levels, candidates=None):
-    """Expand a normal export plan into independently addressable LOD views.
-
-    A selected object is emitted for a target only when that target LOD was
-    observed in the imported package family. Objects without an LOD token are
-    stable resources and remain in every plan. Switch bindings and hidden
-    declarations are copied to each view, so all LODs share one state variable.
-    """
-    target_levels = {int(level) for level in (target_levels or ())}
-    if any(level < 0 or level > 4 for level in target_levels):
-        raise ValueError("LOD export supports levels 0 through 4")
-    candidates = candidates if candidates is not None else bpy.data.objects
-    variants = []
-    bindings = {}
-    hidden = set()
-    for obj in plan["objects"]:
-        source_level = mesh_lod_level(obj)
-        if source_level is None:
-            emitted = [obj]
-        else:
-            available = discover_mesh_lods(obj, candidates)
-            emitted = []
-            for target in sorted(target_levels):
-                if target not in available:
-                    continue
-                emitted.append(obj if target == source_level else
-                               _lod_variant(obj, target, candidates))
-        for variant in emitted:
-            variants.append(variant)
-            if obj in plan["bindings"]:
-                bindings[variant] = plan["bindings"][obj]
-            if obj in plan["hidden"]:
-                hidden.add(variant)
-    if not variants:
-        raise ValueError("所选目标 LOD 在当前导入资源中不存在")
-
-    grouped = defaultdict(list)
-    for obj in sorted(variants, key=lambda item: (mesh_source_identity(item), item.name)):
-        grouped[mesh_source_identity(obj)].append(obj)
-    return {
-        "objects": [obj for values in grouped.values() for obj in values],
-        "sources": list(grouped.values()),
-        "groups": plan["groups"],
-        "bindings": bindings,
-        "hidden": hidden,
-    }
+    return lod.expand_lod_plan(
+        plan, target_levels,
+        candidates if candidates is not None else bpy.data.objects,
+        mesh_source_identity)
 
 
 def lod_levels_for_export(mesh_objects, selected_levels=None, all_levels=False):
-    """Resolve checkbox state to discovered levels, never filename guesses."""
-    discovered = set()
-    for obj in mesh_objects:
-        level = mesh_lod_level(obj)
-        if level is not None:
-            discovered.update(discover_mesh_lods(obj))
-    if all_levels:
-        return sorted(level for level in discovered if 0 <= level <= 4)
-    return sorted(set(selected_levels or ()) & discovered)
+    return lod.lod_levels_for_export(
+        mesh_objects, bpy.data.objects, selected_levels, all_levels)
 
 
-MAGIC_MESH = b"EIEMESH\0"
-MAGIC_SKEL = b"EIESKEL\0"
-
+MAGIC_MESH = format_io.MAGIC_MESH
+MAGIC_SKEL = format_io.MAGIC_SKEL
 
 def is_unity_left_handed(coordinate):
     value = str(coordinate or "").lower()
@@ -340,275 +150,17 @@ def unity_transform_matrix_to_blender(matrix):
     return basis @ matrix @ basis.inverted()
 
 
-class Reader:
-    def __init__(self, data):
-        self.data = data
-        self.pos = 0
-
-    def take(self, size):
-        if size < 0 or self.pos + size > len(self.data):
-            raise ValueError("truncated EIEM file")
-        value = self.data[self.pos:self.pos + size]
-        self.pos += size
-        return value
-
-    def u8(self):
-        return self.take(1)[0]
-
-    def i32(self):
-        return struct.unpack("<i", self.take(4))[0]
-
-    def u32(self):
-        return struct.unpack("<I", self.take(4))[0]
-
-    def f32(self):
-        return struct.unpack("<f", self.take(4))[0]
-
-    def string(self):
-        value = 0
-        shift = 0
-        while True:
-            byte = self.u8()
-            value |= (byte & 0x7f) << shift
-            if not byte & 0x80:
-                break
-            shift += 7
-            if shift > 28:
-                raise ValueError("invalid EIEM string length")
-        return self.take(value).decode("utf-8", "replace")
-
-    def floats(self):
-        count = self.i32()
-        if count < 0 or count > 100000000:
-            raise ValueError("invalid EIEM array length")
-        return list(struct.unpack("<" + "f" * count, self.take(count * 4))) if count else []
-
-
-class Writer:
-    def __init__(self):
-        self.data = bytearray()
-
-    def raw(self, value):
-        self.data.extend(value)
-
-    def i32(self, value):
-        self.raw(struct.pack("<i", int(value)))
-
-    def u32(self, value):
-        self.raw(struct.pack("<I", int(value)))
-
-    def f32(self, value):
-        self.raw(struct.pack("<f", float(value)))
-
-    def string(self, value):
-        encoded = str(value or "").encode("utf-8")
-        length = len(encoded)
-        while length >= 0x80:
-            self.raw(bytes(((length & 0x7f) | 0x80,)))
-            length >>= 7
-        self.raw(bytes((length,)))
-        self.raw(encoded)
-
-    def floats(self, values):
-        values = list(values or [])
-        self.i32(len(values))
-        if values:
-            self.raw(struct.pack("<" + "f" * len(values), *values))
-
-
-def parse_ini(root):
-    # Runtime Render sections may contain EIEM's conditional program syntax.
-    # ConfigParser accepts the indented assignments inside those blocks, but
-    # bare ``if``/``endif`` statements are not INI options and make an
-    # exported package impossible to import back into Blender.  The importer
-    # needs the declared resources and bindings, not execution of the switch
-    # program, so remove only control-flow statements before parsing.
-    lines = []
-    control_words = {"if", "elif", "else", "endif"}
-    with open(Path(root) / "mod.ini", "r", encoding="utf-8-sig") as stream:
-        for line in stream:
-            stripped = line.strip()
-            word = stripped.split(None, 1)[0].lower() if stripped else ""
-            if word in control_words and "=" not in stripped:
-                continue
-            lines.append(line)
-    parser = configparser.ConfigParser(interpolation=None, strict=False)
-    parser.optionxform = str
-    parser.read_string("".join(lines), source=str(Path(root) / "mod.ini"))
-    return parser
-
-
-def parse_material_resources(root):
-    """Read static declarations, not the Mod's executable Render/Key bodies."""
-    lines, include = [], False
-    with open(Path(root) / "mod.ini", "r", encoding="utf-8-sig") as stream:
-        for line in stream:
-            stripped = line.strip()
-            if stripped.startswith("[") and stripped.endswith("]"):
-                include = stripped[1:-1].lower().startswith(("material", "texture"))
-            if include:
-                lines.append(line)
-    parser = configparser.ConfigParser(interpolation=None)
-    parser.optionxform = str
-    parser.read_string("".join(lines))
-    return {s: dict(parser.items(s)) for s in parser.sections()}
-
-
-def read_flat_properties(path):
-    values = {}
-    with open(path, "r", encoding="utf-8-sig") as stream:
-        for line in stream:
-            line = line.strip()
-            if not line or line.startswith((";", "#")) or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            values[key.strip()] = value.strip()
-    return values
-
-
-def safe_path(root, relative):
-    path = (Path(root) / relative).resolve()
-    root = Path(root).resolve()
-    if path != root and root not in path.parents:
-        raise ValueError("EIEM path escapes package directory")
-    return path
-
-
-def read_mesh(path):
-    reader = Reader(path.read_bytes())
-    if reader.take(8) != MAGIC_MESH:
-        raise ValueError("not an EIEM mesh")
-    version = reader.i32()
-    if version not in (2, 3, 4, 5):
-        raise ValueError(f"unsupported EIEM mesh version {version}; re-export with the current AnimeStudio")
-    coordinate = reader.string()
-    source = reader.string()
-    name = reader.string()
-    vertex_count = reader.i32()
-    if vertex_count < 0:
-        raise ValueError("invalid vertex count")
-    vertices = reader.floats()
-    normals = reader.floats()
-    tangents = reader.floats()
-    colors = reader.floats()
-    uvs = [reader.floats() for _ in range(8)]
-    index_count = reader.i32()
-    indices = [reader.u32() for _ in range(max(0, index_count))]
-    submesh_count = reader.i32()
-    submeshes = []
-    for _ in range(max(0, submesh_count)):
-        submeshes.append((reader.i32(), reader.u32(), reader.u32(), reader.u32(), reader.u32(), reader.u32()))
-    skin_count = reader.i32()
-    skin = []
-    for _ in range(max(0, skin_count)):
-        weights = [reader.f32() for _ in range(4)]
-        bones = [reader.u32() for _ in range(4)]
-        skin.append((weights, bones))
-    bind_count = reader.i32()
-    bindposes = [list(struct.unpack("<16f", reader.take(64))) for _ in range(max(0, bind_count))]
-    bone_hashes = [reader.u32() for _ in range(max(0, reader.i32()))]
-    bone_paths = [reader.string() for _ in range(max(0, reader.i32()))] if version >= 3 else []
-    bone_index_paths = [reader.string() for _ in range(max(0, reader.i32()))] if version >= 4 else []
-    bone_sources = []
-    if version >= 5:
-        bone_sources = [(reader.string(), reader.string(), reader.u32())
-                        for _ in range(max(0, reader.i32()))]
-    blend_vertex_count = reader.i32()
-    blend_vertices = []
-    for _ in range(max(0, blend_vertex_count)):
-        blend_vertices.append((
-            reader.u32(),
-            tuple(reader.f32() for _ in range(3)),
-            tuple(reader.f32() for _ in range(3)),
-            tuple(reader.f32() for _ in range(3)),
-        ))
-    blend_frame_count = reader.i32()
-    blend_frames = []
-    for _ in range(max(0, blend_frame_count)):
-        blend_frames.append((
-            reader.string(), reader.u32(), reader.u32(),
-            bool(reader.u8()), bool(reader.u8()), bool(reader.u8()),
-        ))
-    blend_channel_count = reader.i32()
-    blend_channels = []
-    for _ in range(max(0, blend_channel_count)):
-        blend_channels.append((reader.string(), reader.u32(), reader.u32(), reader.u32()))
-    blend_weights = reader.floats()
-    additional_count = reader.i32()
-    additional = [tuple(reader.f32() for _ in range(3))
-                  for _ in range(max(0, additional_count))]
-    if vertex_count and len(vertices) < vertex_count * 3:
-        raise ValueError("mesh vertex data is incomplete")
-    if bone_paths and len(bone_paths) != len(bindposes):
-        raise ValueError("mesh bone path palette does not match its bind poses")
-    if bone_index_paths and len(bone_index_paths) != len(bindposes):
-        raise ValueError("mesh bone hierarchy-index palette does not match its bind poses")
-    if bone_sources and len(bone_sources) != len(bindposes):
-        raise ValueError("mesh bone source palette does not match its bind poses")
-    if len(blend_weights) != len(blend_frames):
-        raise ValueError("mesh BlendShape weights do not match its frames")
-    if reader.pos != len(reader.data):
-        raise ValueError("unexpected trailing EIEM mesh data")
-    return locals()
-
-
-def read_skeleton(path):
-    reader = Reader(path.read_bytes())
-    if reader.take(8) != MAGIC_SKEL:
-        raise ValueError("not an EIEM skeleton")
-    version = reader.i32()
-    if version not in (1, 2):
-        raise ValueError("unsupported EIEM skeleton version")
-    coordinate = reader.string()
-    count = reader.i32()
-    if coordinate != "unity-y-up-left-handed" or not 0 < count <= 16384:
-        raise ValueError("invalid skeleton coordinate space or node count")
-    nodes = []
-    for _ in range(max(0, count)):
-        nodes.append((reader.string(), reader.i32(),
-                      struct.unpack("<3f", reader.take(12)),
-                      struct.unpack("<4f", reader.take(16)),
-                      struct.unpack("<3f", reader.take(12))))
-    bone_count = reader.i32()
-    if not 0 <= bone_count <= 16384:
-        raise ValueError("invalid skeleton palette count")
-    bones = [reader.i32() for _ in range(max(0, bone_count))]
-    root_bone = reader.i32()
-    source_nodes = [True] * len(nodes)
-    if version == 2:
-        if reader.i32() != len(nodes):
-            raise ValueError("skeleton provenance count mismatch")
-        flags = list(reader.take(len(nodes)))
-        if any(flag not in (0, 1) for flag in flags):
-            raise ValueError("invalid skeleton provenance")
-        source_nodes = [bool(flag) for flag in flags]
-    if reader.pos != len(reader.data):
-        raise ValueError("unexpected trailing EIEM skeleton data")
-    validate_skeleton_nodes(nodes, source_nodes)
-    return locals()
-
-
-def validate_skeleton_nodes(nodes, source_nodes):
-    if not 0 < len(nodes) <= 16384 or len(nodes) != len(source_nodes):
-        raise ValueError("invalid skeleton node count")
-    seen = set()
-    for i, (path, parent, position, rotation, scale) in enumerate(nodes):
-        if (path in seen or len(path.encode("utf-8")) > 4096 or "\\" in path or "\0" in path or
-                any(part in ("", ".", "..") for part in path.split("/")) and path != ""):
-            raise ValueError("invalid or duplicate skeleton path: " + path)
-        seen.add(path)
-        if i == 0:
-            if parent != -1 or not source_nodes[i] or "/" in path:
-                raise ValueError("skeleton root must reference the source hierarchy")
-        else:
-            if not 0 <= parent < i or not path or nodes[parent][0] != path.rpartition("/")[0]:
-                raise ValueError("skeleton path/parent mismatch: " + path)
-            if source_nodes[i] and not source_nodes[parent]:
-                raise ValueError("source bone cannot be reparented under a new bone: " + path)
-        if (not all(math.isfinite(v) for v in (*position, *rotation, *scale)) or
-                abs(sum(v*v for v in rotation)-1) > .001 or min(scale) <= 0):
-            raise ValueError("invalid skeleton transform: " + path)
-
+# Re-export the stable scripting surface while the implementation lives in the
+# Blender-independent format module.
+Reader = format_io.Reader
+Writer = format_io.Writer
+parse_ini = format_io.parse_ini
+parse_material_resources = format_io.parse_material_resources
+read_flat_properties = format_io.read_flat_properties
+safe_path = format_io.safe_path
+read_mesh = format_io.read_mesh
+read_skeleton = format_io.read_skeleton
+validate_skeleton_nodes = format_io.validate_skeleton_nodes
 
 def load_material(root, section, values, textures=None):
     material = bpy.data.materials.get(section) or bpy.data.materials.new(section)
@@ -738,6 +290,13 @@ def set_point_attribute(mesh, name, data_type, values, member):
     if existing:
         mesh.attributes.remove(existing)
     attribute = mesh.attributes.new(name=name, type=data_type, domain="POINT")
+    values = list(values)
+    if hasattr(attribute.data, "foreach_set"):
+        if member == "value":
+            attribute.data.foreach_set(member, [float(value) for value in values])
+        else:
+            attribute.data.foreach_set(member, [component for value in values for component in value])
+        return attribute
     for item, value in zip(attribute.data, values):
         setattr(item, member, value)
     return attribute
@@ -747,6 +306,16 @@ def get_point_attribute(mesh, name, member):
     attribute = mesh.attributes.get(name)
     if not attribute or attribute.domain != "POINT" or len(attribute.data) != len(mesh.vertices):
         return None
+    if hasattr(attribute.data, "foreach_get"):
+        if member == "value":
+            values = [0.0] * len(attribute.data)
+            attribute.data.foreach_get(member, values)
+            return values
+        width = len(getattr(attribute.data[0], member)) if attribute.data else 0
+        values = [0.0] * (len(attribute.data) * width)
+        attribute.data.foreach_get(member, values)
+        return [tuple(values[index:index + width])
+                for index in range(0, len(values), width)]
     return [tuple(getattr(item, member)) if member != "value" else float(item.value)
             for item in attribute.data]
 
@@ -898,8 +467,11 @@ def make_mesh(section, payload):
         normals = [tuple(payload["normals"][index * 3:index * 3 + 3]) for index in range(count)]
         if is_unity_left_handed(payload["coordinate"]):
             normals = [unity_to_blender(value) for value in normals]
-        for polygon in mesh.polygons:
-            polygon.use_smooth = True
+        if hasattr(mesh.polygons, "foreach_set"):
+            mesh.polygons.foreach_set("use_smooth", [True] * len(mesh.polygons))
+        else:
+            for polygon in mesh.polygons:
+                polygon.use_smooth = True
         mesh.normals_split_custom_set([normals[loop.vertex_index] for loop in mesh.loops])
         mesh.update()
         # Lossless round-trip backup only. Viewport shading and normal-editing
@@ -929,10 +501,20 @@ def make_mesh(section, payload):
             raise ValueError("UV%d uses unsupported dimension %d" % (channel, dimension))
         uv_dimensions.append(dimension)
         layer = mesh.uv_layers.new(name="UV%d" % channel)
-        for loop in mesh.loops:
-            vertex = loop.vertex_index
-            start = vertex * dimension
-            layer.data[loop.index].uv = values[start:start + 2]
+        loop_vertices = [0] * len(mesh.loops)
+        if hasattr(mesh.loops, "foreach_get"):
+            mesh.loops.foreach_get("vertex_index", loop_vertices)
+        else:
+            loop_vertices = [loop.vertex_index for loop in mesh.loops]
+        loop_uvs = [component
+                    for vertex in loop_vertices
+                    for component in values[vertex * dimension:vertex * dimension + 2]]
+        if hasattr(layer.data, "foreach_set"):
+            layer.data.foreach_set("uv", loop_uvs)
+        else:
+            for loop_index, vertex in enumerate(loop_vertices):
+                start = vertex * dimension
+                layer.data[loop_index].uv = values[start:start + 2]
         if dimension > 2:
             extras = []
             for vertex in range(count):
@@ -948,10 +530,16 @@ def make_mesh(section, payload):
     if len(colors) >= count * 4 and hasattr(mesh, "color_attributes"):
         values = [tuple(colors[index * 4:index * 4 + 4]) for index in range(count)]
         attr = mesh.color_attributes.new(name="Color", type="FLOAT_COLOR", domain="POINT")
-        for item, value in zip(attr.data, values):
-            item.color = value
-    for polygon, submesh in zip(mesh.polygons, face_submesh):
-        polygon.material_index = submesh
+        if hasattr(attr.data, "foreach_set"):
+            attr.data.foreach_set("color", colors[:count * 4])
+        else:
+            for item, value in zip(attr.data, values):
+                item.color = value
+    if hasattr(mesh.polygons, "foreach_set"):
+        mesh.polygons.foreach_set("material_index", face_submesh)
+    else:
+        for polygon, submesh in zip(mesh.polygons, face_submesh):
+            polygon.material_index = submesh
     if "EIEM_SourceNormal" in mesh.attributes:
         mesh["eiem_normal_baseline_crc"] = normal_state_crc(mesh)
     return mesh
@@ -1410,7 +998,13 @@ def mesh_export_uv_channels(mesh):
         dimension = int(dimensions[channel]) if channel < len(dimensions) and dimensions[channel] else 2
         if dimension < 2 or dimension > 4:
             raise ValueError("UV%d uses unsupported dimension %d" % (channel, dimension))
-        xy = [tuple(item.uv) for item in layer.data]
+        if hasattr(layer.data, "foreach_get"):
+            flat_xy = [0.0] * (len(layer.data) * 2)
+            layer.data.foreach_get("uv", flat_xy)
+            xy = [tuple(flat_xy[index:index + 2])
+                  for index in range(0, len(flat_xy), 2)]
+        else:
+            xy = [tuple(item.uv) for item in layer.data]
         zw = None
         if dimension > 2:
             zw = get_point_attribute(mesh, "EIEM_UV%d_ZW" % channel, "vector")
@@ -1427,9 +1021,15 @@ def mesh_export_colors(mesh):
     attribute = mesh.color_attributes.get("Color")
     if attribute is None:
         return None, []
-    values = [tuple(item.color) for item in attribute.data]
     if attribute.domain not in {"POINT", "CORNER"}:
         raise ValueError("Color must use the POINT or CORNER domain")
+    if hasattr(attribute.data, "foreach_get"):
+        flat_values = [0.0] * (len(attribute.data) * 4)
+        attribute.data.foreach_get("color", flat_values)
+        values = [tuple(flat_values[index:index + 4])
+                  for index in range(0, len(flat_values), 4)]
+    else:
+        values = [tuple(item.color) for item in attribute.data]
     return attribute.domain, values
 
 
@@ -4023,10 +3623,12 @@ class EIEM_PT_switches(bpy.types.Panel):
         draw_eiem_rna_property(layout, context.scene, "eiem_switch_active", "当前组", factor=0.3)
         groups = switch_groups(context.scene)
         if groups:
-            mapping = layout.box()
-            mapping.label(text="游戏按键 → 切换组", icon="EVENT_F")
-            for candidate in groups:
-                mapping.label(text="%s  →  %s" % (candidate.get("eiem_key", "未设置"), candidate.name))
+            if len(groups) > 1:
+                mapping = layout.box()
+                mapping.label(text="游戏按键 → 切换组", icon="EVENT_F")
+                for candidate in groups:
+                    mapping.label(text="%s  →  %s" % (
+                        candidate.get("eiem_key", "未设置"), candidate.name))
         group = context.scene.eiem_switch_active
         if group and group.get("eiem_switch_group"):
             name_row = layout.row(align=True)
@@ -4067,12 +3669,27 @@ class EIEM_PT_switches(bpy.types.Panel):
                 op.action, op.state_name = "PREVIEW", current.name
         layout.operator("eiem.switch_restore_preview", icon="LOOP_BACK")
         layout.separator()
-        layout.label(text="只导出所选网格与作者物理组；相机关=游戏隐藏")
-        layout.label(text="眼睛只影响预览；需要的款式请一起选")
+        layout.label(text="相机关控制游戏显隐；眼睛仅用于 Blender 预览")
         obj = context.object
         if obj and obj.type == "MESH" and obj.data.get("eiem_section"):
             draw_eiem_rna_property(layout, obj, "hide_render", "游戏隐藏（相机）", factor=0.5)
         layout.operator("eiem.export_package", text="导出所选 mod", icon="EXPORT")
+
+
+def operator_lod_levels(operator, meshes):
+    selected = [index for index, enabled in enumerate((
+        operator.lod0, operator.lod1, operator.lod2,
+        operator.lod3, operator.lod4)) if enabled]
+    return lod_levels_for_export(meshes, selected, operator.lod_all)
+
+
+def draw_lod_options(layout, operator):
+    box = layout.box()
+    box.prop(operator, "lod_all")
+    row = box.row(align=True)
+    row.enabled = not operator.lod_all
+    for prop in ("lod0", "lod1", "lod2", "lod3", "lod4"):
+        row.prop(operator, prop)
 
 
 class EIEM_OT_import(ImportHelper, bpy.types.Operator):
@@ -4085,6 +3702,12 @@ class EIEM_OT_import(ImportHelper, bpy.types.Operator):
                                  description="可选；物理数据不影响只导出 Mesh")
     physics_file: StringProperty(name="物理源文件", subtype="FILE_PATH",
                                 description="可选 components.json 或 .physics；留空使用包内声明")
+
+    def draw(self, context):
+        self.layout.prop(self, "clean")
+        self.layout.prop(self, "include_physics")
+        if self.include_physics:
+            self.layout.prop(self, "physics_file")
 
     def execute(self, context):
         try:
@@ -4102,7 +3725,7 @@ class EIEM_OT_export(ExportHelper, bpy.types.Operator):
     filename_ext = ""
     directory: StringProperty(subtype="DIR_PATH")
     scope_message: StringProperty(options={"HIDDEN"})
-    lod_all: BoolProperty(name="All discovered LODs", default=True)
+    lod_all: BoolProperty(name="导出已发现的全部 LOD", default=True)
     lod0: BoolProperty(name="LOD0", default=True)
     lod1: BoolProperty(name="LOD1", default=False)
     lod2: BoolProperty(name="LOD2", default=False)
@@ -4110,9 +3733,7 @@ class EIEM_OT_export(ExportHelper, bpy.types.Operator):
     lod4: BoolProperty(name="LOD4", default=False)
 
     def _lod_levels(self, meshes):
-        selected = [index for index, enabled in enumerate((
-            self.lod0, self.lod1, self.lod2, self.lod3, self.lod4)) if enabled]
-        return lod_levels_for_export(meshes, selected, self.lod_all)
+        return operator_lod_levels(self, meshes)
 
     def invoke(self, context, event):
         try:
@@ -4132,16 +3753,8 @@ class EIEM_OT_export(ExportHelper, bpy.types.Operator):
 
     def draw(self, context):
         self.layout.label(text=self.scope_message)
-        box = self.layout.box()
-        box.label(text="导出 LOD（仅使用当前工程已发现的级别）")
-        box.prop(self, "lod_all")
-        row = box.row(align=True)
-        row.enabled = not self.lod_all
-        for prop in ("lod0", "lod1", "lod2", "lod3", "lod4"):
-            row.prop(self, prop)
-        self.layout.label(text="物理组自动带入共享骨架，并作用于同 Rig 的所选网格")
-        self.layout.label(text="相机关写 skip，不写网格文件")
-        self.layout.label(text="眼睛不影响导出；未选中的源资源不修改")
+        draw_lod_options(self.layout, self)
+        self.layout.label(text="仅处理所选资源；相机关写入游戏显隐状态")
 
     def execute(self, context):
         try:
@@ -4171,7 +3784,7 @@ class EIEM_OT_export_mesh_only(ExportHelper, bpy.types.Operator):
     filename_ext = ""
     directory: StringProperty(subtype="DIR_PATH")
     scope_message: StringProperty(options={"HIDDEN"})
-    lod_all: BoolProperty(name="All discovered LODs", default=True)
+    lod_all: BoolProperty(name="导出已发现的全部 LOD", default=True)
     lod0: BoolProperty(name="LOD0", default=True)
     lod1: BoolProperty(name="LOD1", default=False)
     lod2: BoolProperty(name="LOD2", default=False)
@@ -4179,9 +3792,7 @@ class EIEM_OT_export_mesh_only(ExportHelper, bpy.types.Operator):
     lod4: BoolProperty(name="LOD4", default=False)
 
     def _lod_levels(self, meshes):
-        selected = [index for index, enabled in enumerate((
-            self.lod0, self.lod1, self.lod2, self.lod3, self.lod4)) if enabled]
-        return lod_levels_for_export(meshes, selected, self.lod_all)
+        return operator_lod_levels(self, meshes)
 
     def invoke(self, context, event):
         try:
@@ -4212,22 +3823,16 @@ class EIEM_OT_export_mesh_only(ExportHelper, bpy.types.Operator):
     def draw(self, context):
         if self.scope_message:
             self.layout.label(text=self.scope_message)
-        box = self.layout.box()
-        box.label(text="导出 LOD（仅使用当前工程已发现的级别）")
-        box.prop(self, "lod_all")
-        row = box.row(align=True)
-        row.enabled = not self.lod_all
-        for prop in ("lod0", "lod1", "lod2", "lod3", "lod4"):
-            row.prop(self, prop)
+        draw_lod_options(self.layout, self)
 
 
 def menu_import(self, context):
-    self.layout.operator(EIEM_OT_import.bl_idname, text="EIEM package")
+    self.layout.operator(EIEM_OT_import.bl_idname, text="EIEM Mod 包")
 
 
 def menu_export(self, context):
-    self.layout.operator(EIEM_OT_export.bl_idname, text="EIEM package")
-    self.layout.operator(EIEM_OT_export_mesh_only.bl_idname, text="EIEM Mesh only")
+    self.layout.operator(EIEM_OT_export.bl_idname, text="EIEM Mod 包")
+    self.layout.operator(EIEM_OT_export_mesh_only.bl_idname, text="EIEM 仅网格包")
 
 
 classes = (

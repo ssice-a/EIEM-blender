@@ -39,6 +39,8 @@ for cycle in range(3):
     assert module is not previous_module, "Reload kept a stale package module"
     assert Path(module.eiem_blender_addon.__file__).resolve() == directory / "eiem_blender_addon.py"
     assert Path(module.eiem_blender_addon.controls.__file__).resolve() == directory / "eiem_blender_controls.py"
+    assert Path(module.eiem_blender_addon.format_io.__file__).resolve() == directory / "eiem_format.py"
+    assert Path(module.eiem_blender_addon.lod.__file__).resolve() == directory / "eiem_lod.py"
     assert metadata.bl_info == module.bl_info == module.eiem_blender_addon.bl_info
     assert bpy.ops.eiem.import_package.get_rna_type() is not None
     assert bpy.ops.eiem.export_package.get_rna_type() is not None
