@@ -50,6 +50,7 @@ addon.write_mesh(file,obj)
 result=addon.read_mesh(file)
 assert result['bind_count']==5, result['bind_count']
 assert result['bone_paths'][:2]==['Root','Root/Unused']
+assert result['bone_index_paths']==['','0','1','1/0','2'], result['bone_index_paths']
 assert result['bindposes'][:2]==[poses['Root'],poses['Root/Unused']]
 for vertex,name in enumerate(('Root/Pelvis','Root/Pelvis/Foot','Root/Accessory')):
     weights,indices=result['skin'][vertex]
@@ -58,6 +59,9 @@ for vertex,name in enumerate(('Root/Pelvis','Root/Pelvis/Foot','Root/Accessory')
 assert result['bindposes'][result['bone_paths'].index('Root/Pelvis')]==poses['Root/Pelvis']
 assert before==[[(g.group,g.weight) for g in v.groups] for v in obj.data.vertices]
 assert json.loads(obj['eiem_bone_palette_json'])==[by_path['Root'],by_path['Root/Unused']]
+obj['eiem_bone_sources_json'] = json.dumps([
+    ['assets/a.mesh', 'MeshA', 3], ['assets/a.mesh', 'MeshA', 7]])
+assert json.loads(obj['eiem_bone_sources_json'])[1][2] == 7
 first=file.read_bytes(); addon.write_mesh(file,obj); assert file.read_bytes()==first
 
 # Donor meshes may have another bind frame. Convert using common original

@@ -1,0 +1,26 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build add-on archive
+        shell: pwsh
+        run: |
+          $package = "EIEM_Blender"
+          New-Item -ItemType Directory -Force -Path $package | Out-Null
+          Copy-Item __init__.py,eiem_blender_addon.py,eiem_blender_controls.py,eiem_physics_authoring.py,eiem_physics_document.py,eiem_physics_native.py,eiem_physics_source.py,README.md,LICENSE,THIRD_PARTY_NOTICES -Destination $package
+          Compress-Archive -Path $package -DestinationPath "EIEM_Blender_${{ github.ref_name }}.zip"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: EIEM_Blender_${{ github.ref_name }}.zip
+          generate_release_notes: true

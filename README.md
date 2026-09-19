@@ -1,6 +1,6 @@
 # EIEM Blender 开发插件
 
-当前能力、未完成接入和历史记录：[文档索引](../../docs/README.md)。
+运行时能力、协议设计与未完成事项见 [EIEM 文档](https://github.com/ssice-a/EIEM/tree/main/docs)。
 
 开发目录：`E:\vscode\EIEM_Blender`，在 VS Code 中打开这个文件夹。
 
@@ -13,9 +13,11 @@
 - `eiem_physics_native.py`、`eiem_physics_source.py`：源物理图保留、编辑和独立 v2 导出，必须一起分发。
 - `README.md`：本说明。
 
-仓库源文件位于 `tools/Blender/`。部署新版时同步上述八个文件，不要只更新
+本仓库是 Blender 插件的唯一源码仓库。部署新版时同步上述八个文件，不要只更新
 旁边的 `E:\vscode\eiem_blender_addon.py`。无需旧版 `eiem_format.py`、
-`eiem_export.py`，也不要安装旧 ZIP。
+`eiem_export.py`，也不要安装旧 ZIP。DLL 运行时位于
+[ssice-a/EIEM](https://github.com/ssice-a/EIEM)，资源解包器位于
+[ssice-a/AnimeStudio](https://github.com/ssice-a/AnimeStudio)。
 
 ## 开发环境加载
 
@@ -32,7 +34,7 @@ Blender: Start 会重新发现入口。不要同时手动运行单文件版，�
 - 导入选择 AnimeStudio 离线导出的 EIEM 资源目录中的 `mod.ini`，不是单独的
   FBX，也不是只含一个修改网格的游戏测试 mod。
 - 按资源导入网格、共享骨架和 LOD 集合；保存 `.blend` 作为编辑工程。
-- 导出面板可选择 `LOD0` 到 `LOD4`，或导出当前工程已发现的全部 LOD。选中的 Mesh 作为模板复制到目标级别；缺失级别不生成规则，详情见 [LOD 导出](../../docs/blender-lod-export.md)。
+- 导出面板可选择 `LOD0` 到 `LOD4`，或导出当前工程已发现的全部 LOD。选中的 Mesh 作为模板复制到目标级别；缺失级别不生成规则，详情见 [LOD 导出](https://github.com/ssice-a/EIEM/blob/main/docs/blender-lod-export.md)。
 - 修改网格、材质、贴图；需要按键切换时，选网格，在 N → EIEM 中创建切换组，
   录制快捷键。只调整整组的眼睛显隐后记录款式快照；同一网格可在同组多个款式中可见。
   支持主键盘、小键盘数字与运算键，以及 `Ctrl/Shift/Alt` 修饰键组合；小键盘 Enter 与普通 Enter
@@ -46,7 +48,7 @@ Blender: Start 会重新发现入口。不要同时手动运行单文件版，�
   不选某一块不能让游戏单独恢复原 Mesh 中对应的那部分面。
 - 不要覆盖离线源包；条件 INI 是游戏运行产物，后续编辑请重新打开 `.blend`。
 
-详细操作和验证边界见仓库 `docs/blender-switches.md`。
+详细操作和验证边界见 [Blender 切换与导出契约](https://github.com/ssice-a/EIEM/blob/main/docs/blender-switches.md)。
 
 只有一个隐藏目标时，导出结果可以只有 `mod.ini` 中的一个 Render 块和 `handling=skip`，
 不需要 `.mesh`、`.mat` 或 PNG。对同源拆分物体混合显隐时，隐藏原件并仅装配所选的相机开启部件。
@@ -89,7 +91,7 @@ Mesh 容器等无关 Transform 当成骨骼。Typhoea 正常包实测一次导�
 DLL v75 实机确认伙伴包围盒有效、全部物理节点进入伙伴骨骼表，12 个 MOVE 节点持续运动；可见裙摆仍未响应。
 旧 v79 日志已确认作者 Physics 到达 ready、12/12 MOVE 节点变化且 5 个碰撞体进入实例；之后一次只选 Mesh 的
 覆盖导出删掉了 Physics。0.30.3 已修正这项依赖推导，但必须重载插件并重新导出后才能恢复当前游戏包。
-详细格式、依赖、限制和验证见仓库 `docs/physics-authoring-v1.md`。
+详细格式、依赖、限制和验证见 [物理作者工具 v1](https://github.com/ssice-a/EIEM/blob/main/docs/physics-authoring-v1.md)。
 
 旧开发包 `bin/EIEM_Blender-0.11.0-physics-authoring.zip` 仅包含旧 v1，不代表当前源码版本。
 
@@ -149,7 +151,7 @@ MOVE 骨段的半角为 `limitAngle.value × curve(depth)`。这里的 depth 与
 旋转；骨骼显示长度本身不是 Physics 参数。面板中的“Blender 骨骼外形”只改变视图形状，不改变这些数据。
 0.13.0 保存的旧工程仍可读取；选中其 Rig/物理对象后点击“整理当前 Rig 的物理集合”，即可把旧的平铺辅助对象
 迁移到三个分类集合。该操作只改变 Blender 场景组织和编辑显隐，不修改源组件身份或导出内容。
-详细操作、格式与限制见[源作者 v2](../../docs/physics-authoring-v2.md)。
+详细操作、格式与限制见[源作者 v2](https://github.com/ssice-a/EIEM/blob/main/docs/physics-authoring-v2.md)。
 
 原生源球体/胶囊现在可转为作者 v5 碰撞记录并进入组合 Mod；无限平面与完整原生 v2 图仍只用于导入、可视化、
 复制和独立保存。常规 Mesh 与作者物理均按选择增量输出，不以 PFB 限定消费者。
@@ -164,7 +166,7 @@ MOVE 骨段的半角为 `limitAngle.value × curve(depth)`。这里的 depth 与
 - 位置、原切线及符号、多维 UV 的 Z/W、权重、标准形态键增量使用同一源顶点映射。
   不重排骨骼调色板、不删除零权重骨骼槽，也不通过平均 UV/法线来消除接缝。
 - 输出顶点数可能增加，三角形数量不因此增加。未知布局的游戏专用 additional-normal
-  数据仍在需要重映射时明确报错，不冒充已经支持；详见 `docs/vertex-data-contract.md`。
+  数据仍在需要重映射时明确报错，不冒充已经支持；详见 [顶点数据契约](https://github.com/ssice-a/EIEM/blob/main/docs/vertex-data-contract.md)。
 
 ## 切线导出（0.11.1）
 
@@ -178,33 +180,17 @@ MOVE 骨段的半角为 `limitAngle.value × curve(depth)`。这里的 depth 与
 - 旧工程缺失源切线时，重算得到的是新生成数据；想恢复原生数据则需重新解包，不能自动找回。
   本功能不生成游戏专用描边 UV2 或新增形态键的法线/切线增量。
 
-详细数据契约及回归入口见 `docs/vertex-data-contract.md`。仓库升级后需同步/重载实际使用的插件，再重新导出 Mod；
+详细数据契约及回归入口见 [顶点数据契约](https://github.com/ssice-a/EIEM/blob/main/docs/vertex-data-contract.md)。仓库升级后需同步/重载实际使用的插件，再重新导出 Mod；
 本次文件布局不变，不要求修改 DLL 或游戏 INI。
 
-## 一个部位使用共享骨架（0.8.3，配套 DLL v43）
+## 静态 Mesh 的共享骨架槽（EIEMESH v5）
 
-- 外部网格沿用目标 EIEM 物体的来源信息，Armature 修改器指向角色的同一共享骨架；
-  顶点组名称对应该骨架的骨骼，不需要局限于原部位使用的少数骨骼。
-- 原骨骼槽和绑定矩阵不重排、不删除；导出器自动追加额外骨骼，DLL 按完整骨骼路径解析当前实例。
-  无需手写骨骼索引或 INI。已有旧工程直接重新导出，不需要重新拆网格、重画权重。
-- 当前二进制每顶点保存 4 个影响；超过 4 个时保留最强四个并归一化，控制台报告数量。
-  未找到的正权重骨骼或有面顶点没有权重时明确报错，不静默写成全零。不会修改 Blender 原权重。
-- 新导入包将其他部位的原绑定数据存于共享骨架；删掉那些部位物体也不会丢失参考绑定。
-  旧工程优先读取仍保留的源物体元数据。未使用过的骨骼使用源骨架绑定姿态生成新槽；
-  全新骨骼及骨架动画修改不属于本次“沿用现有骨架”的支持范围。
-- 旧导出中已丢掉的权重不能靠 DLL 自动恢复：需要重新导出 `.mesh`。DLL 更新需要重启游戏，
-  F10 只重读资源/配置，不能更新 DLL。当前实际游戏蒙皮结果仍待验收。
-
-## 新增共享骨架节点（0.10.0，配套 DLL v48）
-
-- 沿用已有共享 Armature，在编辑模式 `Shift+A` 新建骨骼，设置父级、位置和旋转，再给网格赋权重。
-  不要直接复制带源身份属性的旧骨骼；重复源路径会报错，不自动猜测新旧身份。
-- 导出时同时选择要处理的网格和共享 Armature；自动输出一个 `.skeleton` 及 Render 的 `skeleton=`。
-  多个部位共用这份骨架，无须分别创建骨架或手写骨骼索引。
-- 原骨骼槽（包括零权重槽）和绑定矩阵保留；新增骨骼追加到 Mesh 局部表。
-  对已有源骨骼修改绑定姿态、父级暂不支持，导出时明确报错。
-- 新骨骼跟随父节点变换，不自动生成独立动画或物理。游戏自定义 GPU 蒙皮仍需验收，
-  完整实现和构建记录见仓库 `docs/skeleton-driving.md`；仓库升级不代表安装目录已更新。
+- 外部网格沿用目标 EIEM 物体的来源信息，Armature 修改器指向角色的同一共享骨架；顶点组用于 Blender 作者编辑。
+- 导入 v5 Mesh 后，每个局部骨骼槽都保留“源 Mesh 路径/asset + 原始槽号”。导出时不得删除或重排这些记录。
+- DLL 在每个世界、UI、NPC 模型实例内，从对应原生源 Mesh 的 `bones[]` 读取 Transform；不依赖骨骼名称相同，也不跨实例借用 Transform。
+- 当前二进制每顶点保存 4 个影响；超过 4 个时保留最强四个并归一化。未找到的正权重骨骼或有面顶点没有权重时明确报错。
+- 旧 v2-v4 `.mesh` 不具备跨 PFB 改名保证，应使用当前插件重新导入并导出为 v5。F10 只重读资源和配置，更新 DLL 仍需重启游戏。
+- 新增骨骼、修改原骨架层级以及 Skeleton/Physics 原生装配属于后续阶段。当前完整契约见 [共享骨架绑定](https://github.com/ssice-a/EIEM/blob/main/docs/shared-skeleton-binding.md)。
 
 ## 款式快照、独立形态按键与可选 Mod UI（0.29）
 
@@ -249,4 +235,4 @@ UI 可以不依赖按键、根据变量显示或互相打开；一个 Lua 可以
 
 仅支持相对 Basis、无顶点组遮罩的形态键；多帧源形态键暂不生成滑条。
 作者数据、导出和权重接口已测试，终末地自定义 GPU 管线的实际形变尚未游戏验收；
-新增形态键也不会自动重建游戏专用法线/切线增量。具体边界见仓库 `docs/shape-controls.md`。
+新增形态键也不会自动重建游戏专用法线/切线增量。具体边界见 [形态键控制](https://github.com/ssice-a/EIEM/blob/main/docs/shape-controls.md)。

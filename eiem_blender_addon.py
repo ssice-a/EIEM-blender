@@ -479,7 +479,7 @@ def read_mesh(path):
     if reader.take(8) != MAGIC_MESH:
         raise ValueError("not an EIEM mesh")
     version = reader.i32()
-    if version not in (2, 3):
+    if version not in (2, 3, 4, 5):
         raise ValueError(f"unsupported EIEM mesh version {version}; re-export with the current AnimeStudio")
     coordinate = reader.string()
     source = reader.string()
@@ -508,6 +508,11 @@ def read_mesh(path):
     bindposes = [list(struct.unpack("<16f", reader.take(64))) for _ in range(max(0, bind_count))]
     bone_hashes = [reader.u32() for _ in range(max(0, reader.i32()))]
     bone_paths = [reader.string() for _ in range(max(0, reader.i32()))] if version >= 3 else []
+    bone_index_paths = [reader.string() for _ in range(max(0, reader.i32()))] if version >= 4 else []
+    bone_sources = []
+    if version >= 5:
+        bone_sources = [(reader.string(), reader.string(), reader.u32())
+                        for _ in range(max(0, reader.i32()))]
     blend_vertex_count = reader.i32()
     blend_vertices = []
     for _ in range(max(0, blend_vertex_count)):
@@ -536,6 +541,10 @@ def read_mesh(path):
         raise ValueError("mesh vertex data is incomplete")
     if bone_paths and len(bone_paths) != len(bindposes):
         raise ValueError("mesh bone path palette does not match its bind poses")
+    if bone_index_paths and len(bone_index_paths) != len(bindposes):
+        raise ValueError("mesh bone hierarchy-index palette does not match its bind poses")
+    if bone_sources and len(bone_sources) != len(bindposes):
+        raise ValueError("mesh bone source palette does not match its bind poses")
     if len(blend_weights) != len(blend_frames):
         raise ValueError("mesh BlendShape weights do not match its frames")
     if reader.pos != len(reader.data):
@@ -1266,6 +1275,10 @@ def import_package(root, clean=False, include_physics=False, physics_file=""):
         # not derive from topology.
         obj["eiem_bindposes_json"] = json.dumps(payload["bindposes"], separators=(",", ":"))
         obj["eiem_bone_hashes_json"] = json.dumps(payload["bone_hashes"], separators=(",", ":"))
+        obj["eiem_bone_index_paths_json"] = json.dumps(
+            payload.get("bone_index_paths", []), separators=(",", ":"))
+        obj["eiem_bone_sources_json"] = json.dumps(
+            payload.get("bone_sources", []), separators=(",", ":"))
         obj.data["eiem_original_vertex_count"] = int(payload["vertex_count"])
         import_blend_shapes(obj, payload)
     for section, values in resources.items():
@@ -1626,12 +1639,48 @@ def shared_skin_bindings(armature):
     return records
 
 
+def armature_bone_index_paths(armature, paths):
+    """Stable Transform child-index paths for cross-prefab bone resolution."""
+    bones = list(armature.data.bones)
+    by_path = {str(bone.get("eiem_path", bone.name)): bone for bone in bones}
+    result = []
+    for path in paths:
+        bone = by_path.get(path)
+        if bone is None:
+            raise ValueError("共享骨架中不存在骨骼路径：" + path)
+        # Skeleton resources contain an empty serialization root above the
+        # first named Transform (usually ``Root``).  Runtime resolution starts
+        # from that named Transform, so make the identity relative to the
+        # named root instead of emitting the empty-root child index as a
+        # spurious leading component.
+        root_path = path.split("/", 1)[0] if path else ""
+        root = by_path.get(root_path)
+        if root is None:
+            raise ValueError("共享骨架中不存在根骨骼路径：" + root_path)
+        indices = []
+        while bone != root:
+            if bone.parent is None:
+                raise ValueError("骨骼不属于其声明的根路径：" + path)
+            siblings = [candidate for candidate in bones
+                        if candidate.parent == bone.parent]
+            try:
+                indices.append(siblings.index(bone))
+            except ValueError:
+                raise ValueError("无法确定骨骼的同级顺序：" + path)
+            bone = bone.parent
+        indices.reverse()
+        result.append("/".join(str(index) for index in indices))
+    return result
+
+
 def export_skin_binding(obj, armature, source_vertices):
     """Keep original slots; extend with bones from this shared armature."""
     if not armature:
         return ([], parse_json_property(obj, "eiem_bindposes_json", []),
                 parse_json_property(obj, "eiem_bone_hashes_json", []),
-                parse_json_property(obj, "eiem_bone_paths_json", []))
+                parse_json_property(obj, "eiem_bone_paths_json", []),
+                parse_json_property(obj, "eiem_bone_index_paths_json", []),
+                parse_json_property(obj, "eiem_bone_sources_json", []))
     original = source_skin_binding(obj, armature)
     hashes = [int(x) for x in parse_json_property(obj, "eiem_bone_hashes_json", [])]
     if not original or len(hashes) != len(original):
@@ -1720,7 +1769,20 @@ def export_skin_binding(obj, armature, source_vertices):
         skin_by_vertex.append((tuple(w for w,i in influences),tuple(i for w,i in influences)))
     if reduced:
         print("[EIEM] %s: %d vertices reduced to the four strongest normalized skin influences" % (obj.name,reduced))
-    return [skin_by_vertex[i] for i in source_vertices], [matrices[p] for p in paths], hashes, paths
+    source_path = str(obj.data.get("eiem_target_path", obj.data.get("eiem_source", "")))
+    source_asset = str(obj.data.get("eiem_target_asset", obj.data.get("eiem_asset", obj.name)))
+    original_sources = parse_json_property(obj, "eiem_bone_sources_json", [])
+    sources = list(original_sources)
+    if not sources:
+        sources = [[source_path, source_asset, index] for index in range(len(paths))]
+    if len(sources) != len(paths):
+        raise ValueError("%s 的骨骼来源槽数量与骨骼绑定不一致" % obj.name)
+    for source in sources:
+        if len(source) != 3 or not str(source[0]).strip() or not str(source[1]).strip():
+            raise ValueError("%s 的骨骼来源槽记录不完整" % obj.name)
+    return ([skin_by_vertex[i] for i in source_vertices],
+            [matrices[p] for p in paths], hashes, paths,
+            armature_bone_index_paths(armature, paths), sources)
 
 
 def write_mesh(path, obj):
@@ -1802,10 +1864,11 @@ def write_mesh(path, obj):
 
     armature = next((modifier.object for modifier in obj.modifiers
                      if modifier.type == "ARMATURE" and modifier.object), None)
-    skin, bindposes, bone_hashes, bone_paths = export_skin_binding(obj, armature, source_vertices)
+    skin, bindposes, bone_hashes, bone_paths, bone_index_paths, bone_sources = export_skin_binding(
+        obj, armature, source_vertices)
     blend_vertices, blend_frames, blend_channels, blend_weights, additional = export_blend_shapes(obj, to_source, source_vertices)
 
-    writer = Writer(); writer.raw(MAGIC_MESH); writer.i32(3)
+    writer = Writer(); writer.raw(MAGIC_MESH); writer.i32(5)
     writer.string(coordinate)
     writer.string(obj.data.get("eiem_source", "")); writer.string(obj.data.get("eiem_asset", obj.name))
     writer.i32(len(source_vertices)); writer.floats(vertices); writer.floats(normals)
@@ -1830,6 +1893,11 @@ def write_mesh(path, obj):
     for value in bone_hashes: writer.u32(value)
     writer.i32(len(bone_paths))
     for value in bone_paths: writer.string(value)
+    writer.i32(len(bone_index_paths))
+    for value in bone_index_paths: writer.string(value)
+    writer.i32(len(bone_sources))
+    for source in bone_sources:
+        writer.string(source[0]); writer.string(source[1]); writer.u32(source[2])
     writer.i32(len(blend_vertices))
     for index, position, normal, tangent in blend_vertices:
         writer.u32(index)
@@ -1932,7 +2000,7 @@ def write_merged_mesh(output, objects):
                 triangle = (triangle[0], triangle[2], triangle[1])
             by_slot.setdefault(slot, []).extend(triangle)
 
-        skin, bindposes, bone_hashes, bone_paths = export_skin_binding(
+        skin, bindposes, bone_hashes, bone_paths, bone_index_paths, bone_sources = export_skin_binding(
             obj, obj.find_armature(), source_vertices)
         parts.append({
             "obj": obj,
@@ -1945,6 +2013,8 @@ def write_merged_mesh(output, objects):
                               (max(by_slot) + 1) if by_slot else 0),
             "skin": skin, "bindposes": bindposes,
             "bone_hashes": bone_hashes, "bone_paths": bone_paths,
+            "bone_index_paths": bone_index_paths,
+            "bone_sources": bone_sources,
         })
 
     # One Mesh has one joint palette. Sibling parts routinely address different
@@ -1958,10 +2028,10 @@ def write_merged_mesh(output, objects):
                 palette_paths.append(path)
     palette_index = {name: index for index, name in enumerate(palette_paths)}
     for part in parts:
-        # export_skin_binding keeps these three in one order: a skin joint, a
-        # bind pose and a hash are all addressed by the part's own palette slot.
+        # All per-slot identities share the part's local palette order.
         if not (len(part["bindposes"]) == len(part["bone_paths"]) ==
-                len(part["bone_hashes"])):
+                len(part["bone_hashes"]) == len(part["bone_index_paths"]) ==
+                len(part["bone_sources"])):
             raise ValueError(
                 "网格 %s 的骨骼路径/绑定矩阵/哈希数量不一致" % part["obj"].name)
         part["remap"] = [palette_index[name] for name in part["bone_paths"]]
@@ -1990,6 +2060,28 @@ def write_merged_mesh(output, objects):
                 hashes[union_slot] = part["bone_hashes"][own_slot]
     if any(value is None for value in hashes):
         raise ValueError("合并的关节调色盘有不存在的骨骼哈希")
+    index_paths = [None] * len(palette_paths)
+    sources = [None] * len(palette_paths)
+    for part in parts:
+        for own_slot, union_slot in enumerate(part["remap"]):
+            value = part["bone_index_paths"][own_slot]
+            existing = index_paths[union_slot]
+            if existing is None:
+                index_paths[union_slot] = value
+            elif existing != value:
+                raise ValueError("合并部件的骨骼层级索引不一致：" +
+                                 part["bone_paths"][own_slot])
+    if any(value is None for value in index_paths):
+        raise ValueError("合并的关节调色盘缺少骨骼层级索引")
+    for part in parts:
+        for own_slot, union_slot in enumerate(part["remap"]):
+            source = part["bone_sources"][own_slot]
+            if sources[union_slot] is None:
+                sources[union_slot] = source
+            elif sources[union_slot] != source:
+                raise ValueError("merged bone source slots disagree")
+    if any(value is None for value in sources):
+        raise ValueError("merged palette is missing bone source slots")
     channels = {part["channels"] for part in parts}
     if len(channels) > 1:
         raise ValueError(
@@ -2031,7 +2123,7 @@ def write_merged_mesh(output, objects):
                          [part["remap"][int(b)] for b in bones_value]))
         vertex_offset += part["count"]
 
-    writer = Writer(); writer.raw(MAGIC_MESH); writer.i32(3)
+    writer = Writer(); writer.raw(MAGIC_MESH); writer.i32(5)
     writer.string(coordinate)
     writer.string(parts[0]["obj"].data.get("eiem_source", ""))
     writer.string(parts[0]["obj"].data.get("eiem_asset", parts[0]["obj"].name))
@@ -2055,6 +2147,11 @@ def write_merged_mesh(output, objects):
     for value in hashes: writer.u32(value)
     writer.i32(len(palette_paths))
     for value in palette_paths: writer.string(value)
+    writer.i32(len(index_paths))
+    for value in index_paths: writer.string(value)
+    writer.i32(len(sources))
+    for source in sources:
+        writer.string(source[0]); writer.string(source[1]); writer.u32(source[2])
     # Blend shapes keep their part-local vertex indices shifted by that part's
     # base offset, exactly like the geometry they displace.
     writer.i32(0); writer.i32(0); writer.i32(0); writer.floats([]); writer.i32(0)

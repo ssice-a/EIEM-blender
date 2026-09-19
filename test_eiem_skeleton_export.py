@@ -57,6 +57,7 @@ for bone,r,source in records:
 
 new_file=output/'test.mesh'; addon.write_mesh(new_file,first); result=addon.read_mesh(new_file)
 assert result['bone_paths'][:2]==['','Rig/Unused']
+assert result['bone_index_paths'][:2]==['','0'], result['bone_index_paths']
 assert result['bindposes'][:2]==[root_pose,unused_pose] # original zero-weight slots are not pruned
 for vertex,path in enumerate(('Rig/Extra','Rig/Extra','Rig/Extra/Tip')):
     weights,indices=result['skin'][vertex]; assert weights==[1,0,0,0]
