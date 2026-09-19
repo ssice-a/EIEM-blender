@@ -88,6 +88,7 @@ generate_mod_ui = controls.generate_mod_ui
 LOD_TOKEN_RE = lod.LOD_TOKEN_RE
 mesh_lod_level = lod.mesh_lod_level
 mesh_lod_family = lod.mesh_lod_family
+mesh_export_template = lod.mesh_export_template
 
 
 def discover_mesh_lods(obj, candidates=None):
@@ -2493,21 +2494,38 @@ def build_merged_action(mesh_objects, plan, root, object_actions, shape_bindings
         groups = merged_groups.setdefault(key, {"members": []})
         groups["members"].append(obj)
 
+    shared_merged = {}
     for key, group in sorted(merged_groups.items(), key=lambda item: item[0]):
         members = group["members"]
         if len(members) < 2:
             # A single part already declares the source's own Mesh.
             del merged_groups[key]
             continue
+        # LOD views may arrive in a different plan order. Canonicalize by the
+        # authored objects so geometry, submesh slots, materials, and switches
+        # retain one order for every Render rule sharing this resource.
+        members.sort(key=lambda member: (
+            mesh_export_template(member).name,
+            mesh_export_template(member).as_pointer()))
         first = members[0]
+        templates = [mesh_export_template(member) for member in members]
+        template_key = tuple(template.as_pointer() for template in templates)
+        shared = shared_merged.get(template_key)
         # Name the merged resource after the part it replaces, marked as merged,
         # so a generated mod.ini shows at a glance that one Mesh carries the
         # whole group.
-        section = unique_export_section(
-            str(first.data["eiem_section"]) + "_MERGED", seen_mesh_sections,
-            "Mesh")
-        filename = "meshes/" + section + ".mesh"
-        stats = write_merged_mesh(root / filename, members)
+        if shared is None:
+            template_first = templates[0]
+            section = unique_export_section(
+                str(template_first.data["eiem_section"]) + "_MERGED",
+                seen_mesh_sections, "Mesh")
+            filename = "meshes/" + section + ".mesh"
+            stats = write_merged_mesh(root / filename, templates)
+            shared_merged[template_key] = (section, stats)
+            wrote_resource = True
+        else:
+            section, stats = shared
+            wrote_resource = False
         # One submesh per material slot, parts in member order, so a part's first
         # slot lands after all earlier parts' slots. Material slots must be
         # numbered in that same merged space or a later part would overwrite an
@@ -2536,19 +2554,24 @@ def build_merged_action(mesh_objects, plan, root, object_actions, shape_bindings
             object_actions[member] = list(action)
         group["slot_ranges"] = slot_ranges
 
-        declaration = [
-            "[" + section + "]", "path=" + filename,
-            "source=" + str(first.data.get("eiem_source", "")),
-            "asset=" + str(first.data.get("eiem_asset", first.name)),
-        ]
-        target_path = str(first.data.get("eiem_target_path", "")).strip()
-        if target_path:
-            declaration.extend([
-                "target.path=" + target_path,
-                "target.asset=" + str(first.data.get("eiem_target_asset", "")),
-            ])
-        declaration.append("")
-        resource_lines.extend(declaration)
+        if wrote_resource:
+            template_first = templates[0]
+            declaration = [
+                "[" + section + "]", "path=" + filename,
+                "source=" + str(template_first.data.get("eiem_source", "")),
+                "asset=" + str(template_first.data.get(
+                    "eiem_asset", template_first.name)),
+            ]
+            target_path = str(template_first.data.get(
+                "eiem_target_path", "")).strip()
+            if target_path:
+                declaration.extend([
+                    "target.path=" + target_path,
+                    "target.asset=" + str(template_first.data.get(
+                        "eiem_target_asset", "")),
+                ])
+            declaration.append("")
+            resource_lines.extend(declaration)
     return merged_groups
 
 
@@ -2739,38 +2762,41 @@ def write_export_package(root, plan, armatures, physics_objects=None,
     for obj in mesh_objects:
         if obj in merged_objects:
             continue
-        # P/duplicate copies source metadata, not geometry identity. Shared
-        # datablocks can still share an exported resource when their skin maps
-        # agree; independent split datablocks get unique files automatically.
-        rig = obj.find_armature()
-        # LOD template views intentionally share Blender geometry, but their
-        # target resources remain independent Mesh assets. Include the target
-        # source identity before datablock identity so they cannot collapse
-        # into one section during ordinary resource deduplication.
-        data_identity = (mesh_source_identity(obj), obj.data.as_pointer(),
-                         rig.as_pointer() if rig else 0, tuple(g.name for g in obj.vertex_groups),
-                         str(obj.get("eiem_bone_palette_json", "")),
-                         str(obj.get("eiem_bindposes_json", "")),
-                         str(obj.get("eiem_bone_paths_json", "")))
+        # A synchronized LOD view changes the target Renderer only. Its Mesh
+        # buffers and source-slot provenance remain those of the selected
+        # authored template, so every target LOD must reference one resource.
+        template = mesh_export_template(obj)
+        rig = template.find_armature()
+        data_identity = (template.data.as_pointer(),
+                         rig.as_pointer() if rig else 0,
+                         tuple(g.name for g in template.vertex_groups),
+                         str(template.get("eiem_bone_palette_json", "")),
+                         str(template.get("eiem_bindposes_json", "")),
+                         str(template.get("eiem_bone_paths_json", "")),
+                         str(template.get("eiem_bone_sources_json", "")))
         section = shared_mesh_sections.get(data_identity)
         if section is None:
-            section = unique_export_section(obj.data["eiem_section"], seen_mesh_sections, "Mesh")
+            section = unique_export_section(
+                template.data["eiem_section"], seen_mesh_sections, "Mesh")
             shared_mesh_sections[data_identity] = section
             filename = "meshes/" + section + ".mesh"
             # Merged groups were already written by build_merged_action, which
             # also re-pointed every member at the shared section. What is left
             # here is one Mesh per part.
-            write_mesh(root / filename, obj)
+            write_mesh(root / filename, template)
             declaration = [
                 "[" + section + "]", "path=" + filename,
-                "source=" + str(obj.data.get("eiem_source", "")),
-                "asset=" + str(obj.data.get("eiem_asset", obj.name)),
+                "source=" + str(template.data.get("eiem_source", "")),
+                "asset=" + str(template.data.get(
+                    "eiem_asset", template.name)),
             ]
-            target_path = str(obj.data.get("eiem_target_path", "")).strip()
+            target_path = str(template.data.get(
+                "eiem_target_path", "")).strip()
             if target_path:
                 declaration.extend([
                     "target.path=" + target_path,
-                    "target.asset=" + str(obj.data.get("eiem_target_asset", "")),
+                    "target.asset=" + str(template.data.get(
+                        "eiem_target_asset", "")),
                 ])
             declaration.append("")
             resource_lines.extend(declaration)
@@ -2881,7 +2907,7 @@ def write_export_package(root, plan, armatures, physics_objects=None,
     (root / "mod.ini").write_text(
         "\n".join(resource_lines + render_lines), encoding="utf-8")
     return {
-        "meshes": len(shared_mesh_sections) + len(merged_groups),
+        "meshes": len(seen_mesh_sections),
         "skeletons": len(exported_armatures),
         "physics": len(physics_sections),
         "materials": len(material_payloads), "textures": len(referenced_images),

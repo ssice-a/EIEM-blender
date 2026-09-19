@@ -51,6 +51,8 @@ class LodTests(unittest.TestCase):
                           for obj in expanded["objects"]], [0, 1])
         self.assertEqual(expanded["bindings"][expanded["objects"][1]],
                          ("$style", [0]))
+        self.assertIs(eiem_lod.mesh_export_template(expanded["objects"][1]),
+                      lod0)
 
     def test_missing_lod_is_not_invented(self):
         lod0 = Mesh(0)

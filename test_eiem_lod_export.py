@@ -71,7 +71,7 @@ except ValueError:
 stats = addon.export_package(
     output / "all", mesh_objects=[lod0], armatures=[], physics_objects=[],
     mesh_only=True, lod_levels=[0, 1])
-assert stats["meshes"] == 2, stats
+assert stats["meshes"] == 1, stats
 
 parser = configparser.ConfigParser(interpolation=None, strict=False)
 parser.optionxform = str
@@ -82,11 +82,16 @@ renders = [section for section in parser.sections()
 meshes = [section for section in parser.sections()
           if section.lower().startswith("mesh")]
 assert len(renders) == 2, renders
-assert len(meshes) == 2, meshes
+assert len(meshes) == 1, meshes
 assert {parser[section]["asset"] for section in renders} == {
     "S_actor_test_lod0", "S_actor_test_lod1"}
 assert all("lod2" not in section.lower() for section in parser.sections())
 assert all(parser[section].get("mesh") for section in renders)
+assert len({parser[section]["mesh"] for section in renders}) == 1
+mesh_section = meshes[0]
+payload = addon.read_mesh(output / "all" / parser[mesh_section]["path"])
+assert payload["source"].endswith("lod0.asset"), payload["source"]
+assert payload["name"] == "S_actor_test_lod0", payload["name"]
 
 stats = addon.export_package(
     output / "lod1", mesh_objects=[lod0], armatures=[], physics_objects=[],

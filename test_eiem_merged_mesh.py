@@ -9,6 +9,7 @@ different subsets of one shared skeleton, each with its own material, which must
 end up as one Mesh whose submesh N is part N's material slot.
 """
 import importlib.util
+import configparser
 import json
 import sys
 import zlib
@@ -21,6 +22,7 @@ addon_path, output = map(Path, sys.argv[sys.argv.index('--') + 1:])
 spec = importlib.util.spec_from_file_location('eiem_merge_test', addon_path)
 addon = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(addon)
+addon.register()
 
 
 def flat(matrix):
@@ -153,6 +155,49 @@ before = file.read_bytes()
 addon.write_merged_mesh(file, [first, second])
 assert file.read_bytes() == before
 
+# Synchronizing the authored LOD0 replacement to another game LOD changes
+# only the target Render rule. Both rules must reference one merged Mesh whose
+# v5 source slots still point at LOD0.
+for obj in (first, second):
+    obj.data['eiem_section'] = 'MeshShared_lod0'
+    obj.data['eiem_asset'] = 'SharedAsset_lod0'
+    obj.data['eiem_source'] = 'assets/test/shared_lod0.asset'
+    obj.data['eiem_target_path'] = 'assets/test/shared_lod0.asset'
+    obj.data['eiem_target_asset'] = 'SharedAsset_lod0'
+    obj['eiem_render_section'] = 'RenderShared_lod0'
+    obj['eiem_render_asset'] = 'SharedAsset_lod0'
+observed = part('ObservedLOD1', ['Root'], [mat_a],
+                [(4, 0, 0), (5, 0, 0), (4, 1, 0)], [(0, 1, 2)])
+observed.data['eiem_section'] = 'MeshShared_lod1'
+observed.data['eiem_asset'] = 'SharedAsset_lod1'
+observed.data['eiem_source'] = 'assets/test/shared_lod1.fbx'
+observed.data['eiem_target_path'] = 'assets/test/shared_lod1.fbx'
+observed.data['eiem_target_asset'] = 'SharedAsset_lod1'
+observed['eiem_render_section'] = 'RenderShared_lod1'
+observed['eiem_render_asset'] = 'SharedAsset_lod1'
+observed.hide_render = True
+
+package = output / 'lod-package'
+stats = addon.export_package(
+    package, mesh_objects=[first, second], armatures=[], physics_objects=[],
+    mesh_only=True, lod_levels=[0, 1])
+assert stats['meshes'] == 1, stats
+parser = configparser.ConfigParser(interpolation=None, strict=False)
+parser.optionxform = str
+with (package / 'mod.ini').open('r', encoding='utf-8-sig') as stream:
+    parser.read_file(stream)
+renders = [section for section in parser.sections()
+           if section.lower().startswith('render')]
+meshes = [section for section in parser.sections()
+          if section.lower().startswith('mesh')]
+assert len(renders) == 2, renders
+assert len(meshes) == 1, meshes
+assert len({parser[section]['mesh'] for section in renders}) == 1
+lod_mesh = addon.read_mesh(package / parser[meshes[0]]['path'])
+assert lod_mesh['name'] == 'SharedAsset_lod0', lod_mesh['name']
+assert {source[1] for source in lod_mesh['bone_sources']} == {
+    'SharedAsset_lod0'}, lod_mesh['bone_sources']
+
 # A part authored in another coordinate space cannot share one vertex buffer,
 # and must fail loudly instead of being silently reinterpreted.
 foreign = part('PartForeign', ['Root'], [mat_c],
@@ -165,3 +210,4 @@ except ValueError as ex:
     assert '坐标系' in str(ex), str(ex)
 
 print('EIEM_MERGE_EXPORT_OK')
+addon.unregister()

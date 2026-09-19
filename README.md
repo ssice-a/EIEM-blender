@@ -42,7 +42,7 @@ EIEM 的 Blender 作者工具。它读取 AnimeStudio 解包出的 EIEM 资源�
 
 ## LOD
 
-导出窗口可以选择 LOD0–LOD4，或导出当前工程中已发现的全部 LOD。插件只为真实存在于导入资源中的级别生成命中规则；缺失级别不会伪造资源。由一个模板生成的各 LOD 共享同一款式状态。
+导出窗口可以选择 LOD0–LOD4，或导出当前工程中已发现的全部 LOD。插件只为真实存在于导入资源中的级别生成命中规则；缺失级别不会伪造资源。选中的模板只写出一份 Mesh，各目标 LOD 的 Render 规则共同引用它，因此几何、权重、bindpose 和源骨骼槽保持同一契约；各 LOD 也共享同一款式状态。
 
 详细契约见 [Blender LOD 导出](https://github.com/ssice-a/EIEM/blob/main/docs/blender-lod-export.md)。
 

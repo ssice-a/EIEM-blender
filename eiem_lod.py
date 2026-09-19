@@ -34,6 +34,16 @@ class _VariantData:
         return getattr(self._source, name)
 
 
+def mesh_export_template(obj):
+    """Return the authored Mesh whose buffers a LOD view exports.
+
+    A LOD view changes only the target Renderer identity. Geometry, skin
+    weights, bind poses, and v5 source-slot provenance remain owned by the
+    selected authored Mesh, so several Render rules can share one resource.
+    """
+    return obj._source if isinstance(obj, _MeshExportVariant) else obj
+
+
 class _MeshExportVariant:
     """Delegate Blender object data while exposing another LOD identity.
 
