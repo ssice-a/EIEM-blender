@@ -20,6 +20,7 @@ import math
 import uuid
 import importlib.util
 import threading
+import numpy as np
 from pathlib import Path
 from collections import defaultdict
 
@@ -335,6 +336,18 @@ def normal_state_crc(mesh):
     an untouched import export the exact source values while still making a
     real Blender normal edit observable to the writer.
     """
+    if hasattr(mesh.loops, "foreach_get") and hasattr(mesh.corner_normals, "foreach_get"):
+        # Preserve the original interleaved <I3f CRC, including saved .blend
+        # baselines, while fetching RNA arrays only once. NumPy ships with Blender.
+        count = min(len(mesh.loops), len(mesh.corner_normals))
+        indices = np.empty(len(mesh.loops), dtype=np.int32)
+        normals = np.empty(len(mesh.corner_normals) * 3, dtype=np.float32)
+        mesh.loops.foreach_get("vertex_index", indices)
+        mesh.corner_normals.foreach_get("vector", normals)
+        records = np.empty(count, dtype=[("vertex", "<u4"), ("normal", "<f4", (3,))])
+        records["vertex"] = indices[:count]
+        records["normal"] = normals.reshape(-1, 3)[:count]
+        return "%08x" % (zlib.crc32(records) & 0xFFFFFFFF)
     checksum = 0
     for loop, corner in zip(mesh.loops, mesh.corner_normals):
         checksum = zlib.crc32(
@@ -462,6 +475,7 @@ def make_mesh(section, payload):
     mesh = bpy.data.meshes.new(section)
     mesh.from_pydata(verts, [], faces)
     mesh.update()
+    loop_vertices = mesh_loop_vertex_indices(mesh)
     mesh["eiem_section"] = section
     mesh["eiem_source"] = payload["source"]
     mesh["eiem_coordinate_space"] = payload["coordinate"]
@@ -479,7 +493,7 @@ def make_mesh(section, payload):
         else:
             for polygon in mesh.polygons:
                 polygon.use_smooth = True
-        mesh.normals_split_custom_set([normals[loop.vertex_index] for loop in mesh.loops])
+        mesh.normals_split_custom_set([normals[index] for index in loop_vertices])
         mesh.update()
         # Lossless round-trip backup only. Viewport shading and normal-editing
         # tools use the native custom split normals set above.
@@ -508,11 +522,6 @@ def make_mesh(section, payload):
             raise ValueError("UV%d uses unsupported dimension %d" % (channel, dimension))
         uv_dimensions.append(dimension)
         layer = mesh.uv_layers.new(name="UV%d" % channel)
-        loop_vertices = [0] * len(mesh.loops)
-        if hasattr(mesh.loops, "foreach_get"):
-            mesh.loops.foreach_get("vertex_index", loop_vertices)
-        else:
-            loop_vertices = [loop.vertex_index for loop in mesh.loops]
         loop_uvs = [component
                     for vertex in loop_vertices
                     for component in values[vertex * dimension:vertex * dimension + 2]]
@@ -962,6 +971,18 @@ def import_package(root, clean=False, include_physics=False, physics_file=""):
     return len(meshes)
 
 
+def mesh_loop_vertex_indices(mesh):
+    values = [0] * len(mesh.loops)
+    mesh.loops.foreach_get("vertex_index", values)
+    return values
+
+
+def mesh_vertex_coordinates(mesh):
+    values = [0.0] * (len(mesh.vertices) * 3)
+    mesh.vertices.foreach_get("co", values)
+    return [tuple(values[index:index + 3]) for index in range(0, len(values), 3)]
+
+
 def export_corner_map(mesh, channels):
     """Split only serialized vertices, using all CORNER streams together.
 
@@ -977,21 +998,22 @@ def export_corner_map(mesh, channels):
     seen = {}
     width = sum(len(values[0]) for values in channels if values)
     key_format = "<%df" % width
-    for loop in mesh.loops:
-        signature = struct.pack(key_format, *(
-            component for values in channels for component in values[loop.index]))
-        key = (loop.vertex_index, signature)
+    pack = struct.Struct(key_format).pack
+    for loop_index, vertex_index in enumerate(mesh_loop_vertex_indices(mesh)):
+        signature = (pack(*channels[0][loop_index]) if len(channels) == 1 else
+                     pack(*(component for values in channels for component in values[loop_index])))
+        key = (vertex_index, signature)
         target = seen.get(key)
         if target is None:
-            target = loop.vertex_index
+            target = vertex_index
             if source_loops[target] is not None:
                 target = len(source_vertices)
-                source_vertices.append(loop.vertex_index)
-                source_loops.append(loop.index)
+                source_vertices.append(vertex_index)
+                source_loops.append(loop_index)
             else:
-                source_loops[target] = loop.index
+                source_loops[target] = loop_index
             seen[key] = target
-        loop_vertices[loop.index] = target
+        loop_vertices[loop_index] = target
     return source_vertices, source_loops, loop_vertices
 
 
@@ -1059,8 +1081,9 @@ def mesh_export_tangents(mesh, source_normals, normal_corners, preserve_normals)
         if (tangent_attr.domain != "POINT" or tangent_attr.data_type != "FLOAT_VECTOR"
                 or sign_attr.domain != "POINT" or sign_attr.data_type != "FLOAT"):
             raise ValueError("EIEM_Tangent/TangentSign must be POINT vector/float attributes")
-        points = [(*item.vector, sign.value)
-                  for item, sign in zip(tangent_attr.data, sign_attr.data)]
+        vectors = get_point_attribute(mesh, "EIEM_Tangent", "vector")
+        signs = get_point_attribute(mesh, "EIEM_TangentSign", "value")
+        points = [(*vector, sign) for vector, sign in zip(vectors, signs)]
 
     def usable(value):
         # Do not normalize/orthogonalize valid custom source frames. In
@@ -1069,15 +1092,15 @@ def mesh_export_tangents(mesh, source_normals, normal_corners, preserve_normals)
         return (all(math.isfinite(x) for x in value)
                 and any(x != 0 for x in value[:3]) and value[3] in (-1, 1))
 
-    def export_normal(loop):
-        value = (source_normals[loop.vertex_index] if preserve_normals
-                 else normal_corners[loop.index])
+    loop_vertices = mesh_loop_vertex_indices(mesh)
+
+    def export_normal(index):
+        value = (source_normals[loop_vertices[index]] if preserve_normals
+                 else normal_corners[index])
         return Vector(value)
 
-    def matches_normal(value, loop):
-        if not usable(value):
-            return False
-        normal = export_normal(loop)
+    def matches_normal(value, normal_value):
+        normal = Vector(normal_value)
         tangent = Vector(value[:3])
         if normal.length_squared == 0.0 or tangent.length_squared == 0.0:
             return False
@@ -1088,9 +1111,17 @@ def mesh_export_tangents(mesh, source_normals, normal_corners, preserve_normals)
         return cosine <= 2.0e-3
 
     point_valid = [usable(value) for value in points] if points else [False] * len(mesh.vertices)
-    missing = [loop.index for loop in mesh.loops
-               if not point_valid[loop.vertex_index]
-               or not matches_normal(points[loop.vertex_index], loop)]
+    if preserve_normals:
+        # Every corner of a source vertex exports the same authored normal.
+        # Validate that frame once per vertex rather than once per face corner.
+        point_matches = [valid and matches_normal(value, normal)
+                         for valid, value, normal in zip(point_valid, points, source_normals)]
+        missing = [index for index, vertex in enumerate(loop_vertices)
+                   if not point_valid[vertex] or not point_matches[vertex]]
+    else:
+        missing = [index for index, vertex in enumerate(loop_vertices)
+                   if not point_valid[vertex]
+                   or not matches_normal(points[vertex], normal_corners[index])]
     if not missing:
         return points, []
     if mesh.uv_layers.get("UV0") is None:
@@ -1111,12 +1142,11 @@ def mesh_export_tangents(mesh, source_normals, normal_corners, preserve_normals)
     finally:
         bpy.data.meshes.remove(work)
     for loop_index in missing:
-        loop = mesh.loops[loop_index]
         value = generated[loop_index]
         if not usable(value):
             raise ValueError("%s corner %d cannot generate a usable tangent; check UV0 and normals" %
                              (mesh.name, loop_index))
-        normal = export_normal(loop)
+        normal = export_normal(loop_index)
         tangent = Vector(value[:3])
         # calc_tangents uses Blender's evaluated normals. Orthogonalize against
         # the exact normal selected for export in case a lossless source-normal
@@ -1131,8 +1161,8 @@ def mesh_export_tangents(mesh, source_normals, normal_corners, preserve_normals)
     # data there, or a zero sentinel rather than inventing a direction.
     points = [points[i] if point_valid[i] else (0., 0., 0., 0.) for i in range(len(mesh.vertices))]
     missing_set = set(missing)
-    corners = [generated[loop.index] if loop.index in missing_set else points[loop.vertex_index]
-               for loop in mesh.loops]
+    corners = [generated[index] if index in missing_set else points[vertex]
+               for index, vertex in enumerate(loop_vertices)]
     print("[EIEM] %s: tangents retained on %d corners; generated %d corners from UV0" %
           (mesh.name, len(mesh.loops) - len(missing), len(missing)))
     return points, corners
@@ -1498,7 +1528,8 @@ def write_mesh(path, obj):
         corner_channels.append(tangent_corners)
     source_vertices, source_loops, loop_vertices = export_corner_map(mesh, corner_channels)
 
-    vertices = [coord for source in source_vertices for coord in to_source(mesh.vertices[source].co)]
+    coordinates = mesh_vertex_coordinates(mesh)
+    vertices = [coord for source in source_vertices for coord in to_source(coordinates[source])]
     normal_values = [source_normals[source] if preserve_normals else
                      normal_corners[loop] if loop is not None else tuple(mesh.vertices[source].normal)
                      for source, loop in zip(source_vertices, source_loops)]
@@ -1561,22 +1592,20 @@ def write_mesh(path, obj):
     writer.floats(tangents); writer.floats(colors)
     for values in uv_layers: writer.floats(values)
     writer.i32(len(indices))
-    for value in indices: writer.u32(value)
+    writer.uints(indices)
     writer.i32(len(submeshes))
     for topology, start, count, base, first, vertex_count in submeshes:
         writer.i32(topology); writer.u32(start); writer.u32(count)
         writer.u32(base); writer.u32(first); writer.u32(vertex_count)
     writer.i32(len(skin))
-    for weights_value, bones_value in skin:
-        for value in weights_value: writer.f32(value)
-        for value in bones_value: writer.u32(value)
+    writer.skin(skin)
     writer.i32(len(bindposes))
     for matrix in bindposes:
         values = list(matrix)[:16]
         values += [0.0] * (16 - len(values))
         for value in values: writer.f32(value)
     writer.i32(len(bone_hashes))
-    for value in bone_hashes: writer.u32(value)
+    writer.uints(bone_hashes)
     writer.i32(len(bone_paths))
     for value in bone_paths: writer.string(value)
     writer.i32(len(bone_index_paths))
@@ -1590,9 +1619,7 @@ def write_mesh(path, obj):
         for source in candidates:
             writer.string(source[0]); writer.string(source[1]); writer.u32(source[2])
     writer.i32(len(blend_vertices))
-    for index, position, normal, tangent in blend_vertices:
-        writer.u32(index)
-        for value in position + normal + tangent: writer.f32(value)
+    writer.blend_vertices(blend_vertices)
     writer.i32(len(blend_frames))
     for name, first, count, has_normals, has_tangents, has_additional in blend_frames:
         writer.string(name); writer.u32(first); writer.u32(count)
@@ -1654,8 +1681,9 @@ def write_merged_mesh(output, objects):
             corner_channels.append(tangent_corners)
         source_vertices, source_loops, loop_vertices = export_corner_map(mesh, corner_channels)
 
+        coordinates = mesh_vertex_coordinates(mesh)
         vertices = [coord for source in source_vertices
-                    for coord in to_source(mesh.vertices[source].co)]
+                    for coord in to_source(coordinates[source])]
         normal_values = [source_normals[source] if preserve_normals else
                          normal_corners[loop] if loop is not None else tuple(mesh.vertices[source].normal)
                          for source, loop in zip(source_vertices, source_loops)]
@@ -1831,20 +1859,18 @@ def write_merged_mesh(output, objects):
     writer.floats(tangents); writer.floats(colors)
     for values in uv_layers: writer.floats(values)
     writer.i32(len(indices))
-    for value in indices: writer.u32(value)
+    writer.uints(indices)
     writer.i32(len(submeshes))
     for topology, start, count, base, first, vertex_count in submeshes:
         writer.i32(topology); writer.u32(start); writer.u32(count)
         writer.u32(base); writer.u32(first); writer.u32(vertex_count)
     writer.i32(len(skin))
-    for weights_value, bones_value in skin:
-        for value in weights_value: writer.f32(value)
-        for value in bones_value: writer.u32(value)
+    writer.skin(skin)
     writer.i32(len(merged_poses))
     for pose in merged_poses:
         for value in pose: writer.f32(value)
     writer.i32(len(hashes))
-    for value in hashes: writer.u32(value)
+    writer.uints(hashes)
     writer.i32(len(palette_paths))
     for value in palette_paths: writer.string(value)
     writer.i32(len(index_paths))

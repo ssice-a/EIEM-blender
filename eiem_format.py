@@ -53,7 +53,26 @@ class Reader:
         count = self.i32()
         if count < 0 or count > 100000000:
             raise ValueError("invalid EIEM array length")
-        return list(struct.unpack("<" + "f" * count, self.take(count * 4))) if count else []
+        return self.array("f", count)
+
+    def array(self, code, count):
+        """Read a homogeneous block with one bounds check and unpack."""
+        size = struct.calcsize("<" + code) * count
+        if count < 0 or self.pos + size > len(self.data):
+            raise ValueError("truncated EIEM file")
+        values = list(struct.unpack_from("<%d%s" % (count, code), self.data, self.pos))
+        self.pos += size
+        return values
+
+    def records(self, layout, count):
+        """Iterate fixed-width records without slicing/copying each scalar."""
+        record = struct.Struct(layout)
+        size = record.size * count
+        if count < 0 or self.pos + size > len(self.data):
+            raise ValueError("truncated EIEM file")
+        view = memoryview(self.data)[self.pos:self.pos + size]
+        self.pos += size
+        return record.iter_unpack(view)
 
 
 class Writer:
@@ -85,7 +104,22 @@ class Writer:
         values = list(values or [])
         self.i32(len(values))
         if values:
-            self.raw(struct.pack("<" + "f" * len(values), *values))
+            self.raw(struct.pack("<%df" % len(values), *values))
+
+    def uints(self, values):
+        """Write a raw uint32 block; its count belongs to the caller."""
+        if values:
+            self.raw(struct.pack("<%dI" % len(values), *values))
+
+    def skin(self, values):
+        pack = struct.Struct("<4f4I").pack
+        for weights, bones in values:
+            self.raw(pack(*weights, *bones))
+
+    def blend_vertices(self, values):
+        pack = struct.Struct("<I9f").pack
+        for index, position, normal, tangent in values:
+            self.raw(pack(index, *position, *normal, *tangent))
 
 
 def parse_ini(root):
@@ -172,20 +206,17 @@ def read_mesh(path):
     colors = reader.floats()
     uvs = [reader.floats() for _ in range(8)]
     index_count = reader.i32()
-    indices = [reader.u32() for _ in range(max(0, index_count))]
+    indices = reader.array("I", max(0, index_count))
     submesh_count = reader.i32()
     submeshes = []
-    for _ in range(max(0, submesh_count)):
-        submeshes.append((reader.i32(), reader.u32(), reader.u32(), reader.u32(), reader.u32(), reader.u32()))
+    submeshes = list(reader.records("<i5I", max(0, submesh_count)))
     skin_count = reader.i32()
     skin = []
-    for _ in range(max(0, skin_count)):
-        weights = [reader.f32() for _ in range(4)]
-        bones = [reader.u32() for _ in range(4)]
-        skin.append((weights, bones))
+    skin = [(list(record[:4]), list(record[4:]))
+            for record in reader.records("<4f4I", max(0, skin_count))]
     bind_count = reader.i32()
-    bindposes = [list(struct.unpack("<16f", reader.take(64))) for _ in range(max(0, bind_count))]
-    bone_hashes = [reader.u32() for _ in range(max(0, reader.i32()))]
+    bindposes = [list(record) for record in reader.records("<16f", max(0, bind_count))]
+    bone_hashes = reader.array("I", max(0, reader.i32()))
     bone_paths = [reader.string() for _ in range(max(0, reader.i32()))] if version >= 3 else []
     bone_index_paths = [reader.string() for _ in range(max(0, reader.i32()))] if version >= 4 else []
     bone_sources = []
@@ -208,13 +239,8 @@ def read_mesh(path):
             ])
     blend_vertex_count = reader.i32()
     blend_vertices = []
-    for _ in range(max(0, blend_vertex_count)):
-        blend_vertices.append((
-            reader.u32(),
-            tuple(reader.f32() for _ in range(3)),
-            tuple(reader.f32() for _ in range(3)),
-            tuple(reader.f32() for _ in range(3)),
-        ))
+    blend_vertices = [(record[0], record[1:4], record[4:7], record[7:10])
+                      for record in reader.records("<I9f", max(0, blend_vertex_count))]
     blend_frame_count = reader.i32()
     blend_frames = []
     for _ in range(max(0, blend_frame_count)):
@@ -228,8 +254,7 @@ def read_mesh(path):
         blend_channels.append((reader.string(), reader.u32(), reader.u32(), reader.u32()))
     blend_weights = reader.floats()
     additional_count = reader.i32()
-    additional = [tuple(reader.f32() for _ in range(3))
-                  for _ in range(max(0, additional_count))]
+    additional = list(reader.records("<3f", max(0, additional_count)))
     if vertex_count and len(vertices) < vertex_count * 3:
         raise ValueError("mesh vertex data is incomplete")
     if bone_paths and len(bone_paths) != len(bindposes):
