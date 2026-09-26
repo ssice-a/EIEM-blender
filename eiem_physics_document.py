@@ -9,9 +9,6 @@ import struct
 from pathlib import Path
 
 MAGIC = b"EIEPHYS\0"
-LEGACY_VERSION = 1
-RADIUS_VERSION = 3
-NATIVE_PARAMETER_VERSION = 4
 VERSION = 5  # Version 2 belongs to the native source-graph format.
 COORDINATE = "unity-y-up-left-handed"
 PARAMETERS = ("gravity", "stablizationTimeAfterReset", "gravityFalloff",
@@ -94,8 +91,7 @@ def native_parameter(value):
 
 def validate(document, bone_paths=None):
     keys(document, "version purpose coordinate backend id skeleton groups colliders", "document")
-    require(type(document["version"]) is int and document["version"] in
-            (LEGACY_VERSION, RADIUS_VERSION, NATIVE_PARAMETER_VERSION, VERSION),
+    require(type(document["version"]) is int and document["version"] == VERSION,
             "unsupported version")
     require(document["purpose"] == "authoring", "unsupported resource purpose")
     require(document["coordinate"] == COORDINATE and document["backend"] == "BeyondDynamicBone",
@@ -120,7 +116,7 @@ def validate(document, bone_paths=None):
 
     for collider in colliders:
         keys(collider, "id name bone shape position rotation radius span" +
-             (" endRadius alignedOnCenter" if document["version"] >= VERSION else ""), "collider")
+             " endRadius alignedOnCenter", "collider")
         unique(collider)
         collider_ids.add(collider["id"])
         bone(collider["bone"])
@@ -129,23 +125,22 @@ def validate(document, bone_paths=None):
         vector(collider["rotation"], 4)
         require(abs(sum(x*x for x in collider["rotation"]) - 1) <= 0.001, "unnormalized rotation")
         number(collider["radius"], 1.401298464324817e-45)
-        if document["version"] >= VERSION:
-            number(collider["endRadius"], 1.401298464324817e-45)
-            require(type(collider["alignedOnCenter"]) is bool,
-                    "invalid collider alignment")
+        number(collider["endRadius"], 1.401298464324817e-45)
+        require(type(collider["alignedOnCenter"]) is bool,
+                "invalid collider alignment")
         number(collider["span"])
         require(collider["shape"] != "SPHERE" or
                 (collider["span"] == 0 and collider.get("endRadius", collider["radius"]) == collider["radius"]),
                 "sphere span and radii are invalid")
-        if (document["version"] >= VERSION and collider["shape"] == "CAPSULE" and
+        if (collider["shape"] == "CAPSULE" and
                 collider["alignedOnCenter"]):
             require(collider["span"] >= abs(collider["radius"] - collider["endRadius"]),
                     "centered capsule cannot represent the requested cap-centre span")
     used_colliders = set()
     for group in groups:
         keys(group, "id name nodes parameters colliders" +
-             (" radius" if document["version"] >= RADIUS_VERSION else "") +
-             (" nativeParameters" if document["version"] >= NATIVE_PARAMETER_VERSION else ""), "group")
+             " radius" +
+             " nativeParameters", "group")
         unique(group)
         nodes = group["nodes"]
         require(isinstance(nodes, list) and 2 <= len(nodes) <= 16384, "a chain needs 2..16384 nodes")
@@ -166,40 +161,38 @@ def validate(document, bone_paths=None):
         keys(group["parameters"], " ".join(PARAMETERS), "parameters")
         for name, value in group["parameters"].items():
             number(value, maximum=1.0 if name in PARAMETERS[2:] else 3.4028234663852886e38)
-        if document["version"] >= RADIUS_VERSION:
-            radius = group["radius"]
-            keys(radius, "value useCurve keys preInfinity postInfinity rotationOrder", "node radius")
-            number(radius["value"], 1.401298464324817e-45)
-            require(type(radius["useCurve"]) is bool, "invalid node radius curve switch")
-            curve = radius["keys"]
-            require(isinstance(curve, list) and 2 <= len(curve) <= MAX_CURVE_KEYS,
-                    "node radius curve needs 2..%d keys" % MAX_CURVE_KEYS)
-            times = []
-            for key in curve:
-                keys(key, "time value inSlope outSlope weightedMode inWeight outWeight", "node radius key")
-                number(key["time"], 0.0, 1.0); times.append(key["time"])
-                number(key["value"])
-                number(key["inSlope"], -3.4028234663852886e38)
-                number(key["outSlope"], -3.4028234663852886e38)
-                require(type(key["weightedMode"]) is int and 0 <= key["weightedMode"] <= 3,
-                        "invalid node radius weighted mode")
-                number(key["inWeight"], 0.0, 1.0); number(key["outWeight"], 0.0, 1.0)
-            require(all(a < b for a, b in zip(times, times[1:])),
-                    "node radius key times must increase")
-            for name in ("preInfinity", "postInfinity"):
-                require(type(radius[name]) is int and -2147483648 <= radius[name] <= 2147483647,
-                        "invalid node radius infinity mode")
-            require(type(radius["rotationOrder"]) is int and 0 <= radius["rotationOrder"] <= 5,
-                    "invalid node radius rotation order")
-        if document["version"] >= NATIVE_PARAMETER_VERSION:
-            parameters = group["nativeParameters"]
-            require(isinstance(parameters, list) and len(parameters) <= MAX_NATIVE_PARAMETERS,
-                    "invalid native parameter count")
-            native_paths = set()
-            for parameter in parameters:
-                native_parameter(parameter)
-                require(parameter["path"] not in native_paths, "duplicate native parameter path")
-                native_paths.add(parameter["path"])
+        radius = group["radius"]
+        keys(radius, "value useCurve keys preInfinity postInfinity rotationOrder", "node radius")
+        number(radius["value"], 1.401298464324817e-45)
+        require(type(radius["useCurve"]) is bool, "invalid node radius curve switch")
+        curve = radius["keys"]
+        require(isinstance(curve, list) and 2 <= len(curve) <= MAX_CURVE_KEYS,
+                "node radius curve needs 2..%d keys" % MAX_CURVE_KEYS)
+        times = []
+        for key in curve:
+            keys(key, "time value inSlope outSlope weightedMode inWeight outWeight", "node radius key")
+            number(key["time"], 0.0, 1.0); times.append(key["time"])
+            number(key["value"])
+            number(key["inSlope"], -3.4028234663852886e38)
+            number(key["outSlope"], -3.4028234663852886e38)
+            require(type(key["weightedMode"]) is int and 0 <= key["weightedMode"] <= 3,
+                    "invalid node radius weighted mode")
+            number(key["inWeight"], 0.0, 1.0); number(key["outWeight"], 0.0, 1.0)
+        require(all(a < b for a, b in zip(times, times[1:])),
+                "node radius key times must increase")
+        for name in ("preInfinity", "postInfinity"):
+            require(type(radius[name]) is int and -2147483648 <= radius[name] <= 2147483647,
+                    "invalid node radius infinity mode")
+        require(type(radius["rotationOrder"]) is int and 0 <= radius["rotationOrder"] <= 5,
+                "invalid node radius rotation order")
+        parameters = group["nativeParameters"]
+        require(isinstance(parameters, list) and len(parameters) <= MAX_NATIVE_PARAMETERS,
+                "invalid native parameter count")
+        native_paths = set()
+        for parameter in parameters:
+            native_parameter(parameter)
+            require(parameter["path"] not in native_paths, "duplicate native parameter path")
+            native_paths.add(parameter["path"])
         refs = group["colliders"]
         require(isinstance(refs, list) and len(refs) <= 4096 and all(isinstance(r, str) for r in refs),
                 "invalid collider references")
@@ -262,11 +255,8 @@ def encode(document):
         w.value("B", SHAPES.index(c["shape"]))
         w.value("3f", *c["position"])
         w.value("4f", *c["rotation"])
-        if document["version"] >= VERSION:
-            w.value("3f", c["radius"], c["endRadius"], c["span"])
-            w.value("B", int(c["alignedOnCenter"]))
-        else:
-            w.value("2f", c["radius"], c["span"])
+        w.value("3f", c["radius"], c["endRadius"], c["span"])
+        w.value("B", int(c["alignedOnCenter"]))
     w.value("I", len(document["groups"]))
     for g in document["groups"]:
         w.string(g["id"])
@@ -276,20 +266,18 @@ def encode(document):
             w.string(node["bone"])
             w.value("B", ROLES.index(node["role"]))
         w.value("5f", *(g["parameters"][key] for key in PARAMETERS))
-        if document["version"] >= RADIUS_VERSION:
-            radius = g["radius"]
-            w.value("fB", radius["value"], int(radius["useCurve"]))
-            w.value("I", len(radius["keys"]))
-            for key in radius["keys"]:
-                w.value("4fI2f", key["time"], key["value"], key["inSlope"], key["outSlope"],
-                        key["weightedMode"], key["inWeight"], key["outWeight"])
-            w.value("3i", radius["preInfinity"], radius["postInfinity"], radius["rotationOrder"])
-        if document["version"] >= NATIVE_PARAMETER_VERSION:
-            w.value("I", len(g["nativeParameters"]))
-            for parameter in g["nativeParameters"]:
-                w.string(parameter["path"])
-                w.value("B", int(parameter["floating"]))
-                w.value("f" if parameter["floating"] else "i", parameter["value"])
+        radius = g["radius"]
+        w.value("fB", radius["value"], int(radius["useCurve"]))
+        w.value("I", len(radius["keys"]))
+        for key in radius["keys"]:
+            w.value("4fI2f", key["time"], key["value"], key["inSlope"], key["outSlope"],
+                    key["weightedMode"], key["inWeight"], key["outWeight"])
+        w.value("3i", radius["preInfinity"], radius["postInfinity"], radius["rotationOrder"])
+        w.value("I", len(g["nativeParameters"]))
+        for parameter in g["nativeParameters"]:
+            w.string(parameter["path"])
+            w.value("B", int(parameter["floating"]))
+            w.value("f" if parameter["floating"] else "i", parameter["value"])
         w.value("I", len(g["colliders"]))
         for ref in g["colliders"]:
             w.string(ref)
@@ -301,7 +289,7 @@ def decode(data):
     r = Reader(data)
     require(r.raw(8) == MAGIC, "invalid magic")
     version, = r.value("I")
-    require(version in (LEGACY_VERSION, RADIUS_VERSION, NATIVE_PARAMETER_VERSION, VERSION), "unsupported version")
+    require(version == VERSION, "unsupported version")
     d = {"version": version}
     for key in ("purpose", "coordinate", "backend", "id", "skeleton"):
         d[key] = r.string()
@@ -311,13 +299,10 @@ def decode(data):
         shape, = r.value("B")
         require(shape < len(SHAPES), "unsupported collider type")
         c.update(shape=SHAPES[shape], position=list(r.value("3f")), rotation=list(r.value("4f")))
-        if version >= VERSION:
-            c["radius"], c["endRadius"], c["span"] = r.value("3f")
-            aligned, = r.value("B")
-            require(aligned <= 1, "invalid collider alignment")
-            c["alignedOnCenter"] = bool(aligned)
-        else:
-            c["radius"], c["span"] = r.value("2f")
+        c["radius"], c["endRadius"], c["span"] = r.value("3f")
+        aligned, = r.value("B")
+        require(aligned <= 1, "invalid collider alignment")
+        c["alignedOnCenter"] = bool(aligned)
         d["colliders"].append(c)
     d["groups"] = []
     for _ in range(r.count(1024)):
@@ -327,24 +312,22 @@ def decode(data):
             require(role < len(ROLES), "invalid node role")
             g["nodes"].append({"bone": bone, "role": ROLES[role]})
         g["parameters"] = dict(zip(PARAMETERS, r.value("5f")))
-        if version >= RADIUS_VERSION:
-            value, use_curve = r.value("fB")
-            radius = {"value": value, "useCurve": bool(use_curve), "keys": []}
-            require(use_curve <= 1, "invalid node radius curve switch")
-            for _ in range(r.count(MAX_CURVE_KEYS)):
-                time, value, in_slope, out_slope, weighted_mode, in_weight, out_weight = r.value("4fI2f")
-                radius["keys"].append({"time": time, "value": value, "inSlope": in_slope,
-                    "outSlope": out_slope, "weightedMode": weighted_mode,
-                    "inWeight": in_weight, "outWeight": out_weight})
-            radius["preInfinity"], radius["postInfinity"], radius["rotationOrder"] = r.value("3i")
-            g["radius"] = radius
-        if version >= NATIVE_PARAMETER_VERSION:
-            g["nativeParameters"] = []
-            for _ in range(r.count(MAX_NATIVE_PARAMETERS)):
-                path, floating = r.string(), r.value("B")[0]
-                require(floating <= 1, "invalid native parameter type")
-                value, = r.value("f" if floating else "i")
-                g["nativeParameters"].append({"path": path, "floating": bool(floating), "value": value})
+        value, use_curve = r.value("fB")
+        radius = {"value": value, "useCurve": bool(use_curve), "keys": []}
+        require(use_curve <= 1, "invalid node radius curve switch")
+        for _ in range(r.count(MAX_CURVE_KEYS)):
+            time, value, in_slope, out_slope, weighted_mode, in_weight, out_weight = r.value("4fI2f")
+            radius["keys"].append({"time": time, "value": value, "inSlope": in_slope,
+                "outSlope": out_slope, "weightedMode": weighted_mode,
+                "inWeight": in_weight, "outWeight": out_weight})
+        radius["preInfinity"], radius["postInfinity"], radius["rotationOrder"] = r.value("3i")
+        g["radius"] = radius
+        g["nativeParameters"] = []
+        for _ in range(r.count(MAX_NATIVE_PARAMETERS)):
+            path, floating = r.string(), r.value("B")[0]
+            require(floating <= 1, "invalid native parameter type")
+            value, = r.value("f" if floating else "i")
+            g["nativeParameters"].append({"path": path, "floating": bool(floating), "value": value})
         g["colliders"] = [r.string() for _ in range(r.count(4096))]
         d["groups"].append(g)
     require(r.offset == len(data), "trailing resource data")

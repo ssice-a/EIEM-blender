@@ -192,7 +192,7 @@ def read_mesh(path):
     if reader.take(8) != MAGIC_MESH:
         raise ValueError("not an EIEM mesh")
     version = reader.i32()
-    if version not in (2, 3, 4, 5, 6):
+    if version != 6:
         raise ValueError(f"unsupported EIEM mesh version {version}; re-export with the current AnimeStudio")
     coordinate = reader.string()
     source = reader.string()
@@ -208,37 +208,30 @@ def read_mesh(path):
     index_count = reader.i32()
     indices = reader.array("I", max(0, index_count))
     submesh_count = reader.i32()
-    submeshes = []
     submeshes = list(reader.records("<i5I", max(0, submesh_count)))
     skin_count = reader.i32()
-    skin = []
     skin = [(list(record[:4]), list(record[4:]))
             for record in reader.records("<4f4I", max(0, skin_count))]
     bind_count = reader.i32()
     bindposes = [list(record) for record in reader.records("<16f", max(0, bind_count))]
     bone_hashes = reader.array("I", max(0, reader.i32()))
-    bone_paths = [reader.string() for _ in range(max(0, reader.i32()))] if version >= 3 else []
-    bone_index_paths = [reader.string() for _ in range(max(0, reader.i32()))] if version >= 4 else []
-    bone_sources = []
-    if version >= 5:
-        bone_sources = [(reader.string(), reader.string(), reader.u32())
-                        for _ in range(max(0, reader.i32()))]
+    bone_paths = [reader.string() for _ in range(max(0, reader.i32()))]
+    bone_index_paths = [reader.string() for _ in range(max(0, reader.i32()))]
+    bone_sources = [(reader.string(), reader.string(), reader.u32())
+                    for _ in range(max(0, reader.i32()))]
+    candidate_slots = reader.i32()
+    if candidate_slots < 0 or candidate_slots != len(bindposes):
+        raise ValueError("invalid mesh bone source candidate count")
     bone_source_candidates = []
-    if version >= 6:
-        candidate_slots = reader.i32()
-        if candidate_slots < 0 or candidate_slots != len(bindposes):
-            raise ValueError("invalid mesh bone source candidate count")
-        bone_source_candidates = []
-        for _ in range(candidate_slots):
-            candidate_count = reader.i32()
-            if candidate_count <= 0 or candidate_count > 1024:
-                raise ValueError("mesh bone source slot has no candidates")
-            bone_source_candidates.append([
-                (reader.string(), reader.string(), reader.u32())
-                for _ in range(candidate_count)
-            ])
+    for _ in range(candidate_slots):
+        candidate_count = reader.i32()
+        if candidate_count <= 0 or candidate_count > 1024:
+            raise ValueError("mesh bone source slot has no candidates")
+        bone_source_candidates.append([
+            (reader.string(), reader.string(), reader.u32())
+            for _ in range(candidate_count)
+        ])
     blend_vertex_count = reader.i32()
-    blend_vertices = []
     blend_vertices = [(record[0], record[1:4], record[4:7], record[7:10])
                       for record in reader.records("<I9f", max(0, blend_vertex_count))]
     blend_frame_count = reader.i32()
@@ -277,7 +270,7 @@ def read_skeleton(path):
     if reader.take(8) != MAGIC_SKEL:
         raise ValueError("not an EIEM skeleton")
     version = reader.i32()
-    if version not in (1, 2):
+    if version != 2:
         raise ValueError("unsupported EIEM skeleton version")
     coordinate = reader.string()
     count = reader.i32()
@@ -294,14 +287,12 @@ def read_skeleton(path):
         raise ValueError("invalid skeleton palette count")
     bones = [reader.i32() for _ in range(max(0, bone_count))]
     root_bone = reader.i32()
-    source_nodes = [True] * len(nodes)
-    if version == 2:
-        if reader.i32() != len(nodes):
-            raise ValueError("skeleton provenance count mismatch")
-        flags = list(reader.take(len(nodes)))
-        if any(flag not in (0, 1) for flag in flags):
-            raise ValueError("invalid skeleton provenance")
-        source_nodes = [bool(flag) for flag in flags]
+    if reader.i32() != len(nodes):
+        raise ValueError("skeleton provenance count mismatch")
+    flags = list(reader.take(len(nodes)))
+    if any(flag not in (0, 1) for flag in flags):
+        raise ValueError("invalid skeleton provenance")
+    source_nodes = [bool(flag) for flag in flags]
     if reader.pos != len(reader.data):
         raise ValueError("unexpected trailing EIEM skeleton data")
     validate_skeleton_nodes(nodes, source_nodes)

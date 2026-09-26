@@ -206,18 +206,15 @@ try:
 except ValueError as error: assert "不覆盖" in str(error)
 assert file.read_bytes() == original
 
-# Legacy author v1 remains importable; it acquires the documented flat default
-# radius in Blender and exports as the current author v5 format.
-legacy_payload = pycopy.deepcopy(payload); legacy_payload["version"] = physics.document.LEGACY_VERSION
+# Old author versions are rejected by the current exporter.
+legacy_payload = pycopy.deepcopy(payload); legacy_payload["version"] = 4
 for record in legacy_payload["groups"]: record.pop("radius"); record.pop("nativeParameters")
 for record in legacy_payload["colliders"]: record.pop("endRadius"); record.pop("alignedOnCenter")
-legacy_file = output / "legacy.physics"; legacy_file.write_bytes(physics.document.encode(legacy_payload))
-legacy_rig, legacy_groups = physics.import_physics(legacy_file)
-assert all(abs(item.eiem_physics.node_radius - .006) < 1e-8 for item in legacy_groups)
-assert all(physics.native.curve_mapping_node(item, physics.native.NODE_RADIUS_PARAMETER) is not None
-           for item in legacy_groups)
-legacy_out = output / "legacy-current.physics"; physics.export_physics(legacy_out, legacy_groups)
-assert physics.document.read(legacy_out)["version"] == physics.document.VERSION
+try:
+    physics.document.encode(legacy_payload)
+    raise AssertionError("old author format accepted")
+except ValueError:
+    pass
 
 # Exercise the actual edit-mode UI path: new identity properties must survive
 # Blender's EditBone -> Bone synchronization when the operator exits Edit Mode.

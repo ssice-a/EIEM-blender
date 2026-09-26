@@ -74,7 +74,7 @@ UV 接缝、顶点色、切线和多维 UV 会按面角拆分输出顶点，不�
 
 EIEMESH v6 保存每个局部骨骼槽的“源 Mesh 身份 + 原始槽号候选”。导出器保留全部原槽，只在末尾追加新增槽；新增槽必须能在同一 Armature 的原生 Mesh 供体中找到。DLL 在当前 NPC、UI 或大世界实例内，从对应原生 Mesh 的 `bones[]` 解析 Transform，因此不依赖三个 PFB 使用完全相同的骨骼名称，也不会跨实例借用骨骼。
 
-当前每个顶点保存四个最强影响并归一化。缺失正权重骨骼、无权重面顶点或损坏的源槽会明确报错。旧 EIEMESH v2–v5 保留兼容读取，但 v2–v4 不具备跨 PFB 改名保证，应重新导入并导出为 v6。
+当前每个顶点保存四个最强影响并归一化。缺失正权重骨骼、无权重面顶点或损坏的源槽会明确报错。插件只读取 EIEMESH v6 和 EIESKEL v2；旧资源需要用当前工具重新导出。
 
 详细契约见 [共享骨架绑定](https://github.com/ssice-a/EIEM/blob/main/docs/shared-skeleton-binding.md)。
 
