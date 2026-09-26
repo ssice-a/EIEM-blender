@@ -46,6 +46,12 @@ extra=rig.data.edit_bones.new('Extra'); extra.head=(.4,.2,1.5); extra.tail=(.6,.
 tip=rig.data.edit_bones.new('Tip'); tip.head=extra.tail; tip.tail=(.7,.8,2.1); tip.roll=-.2; tip.parent=extra
 bpy.ops.object.mode_set(mode='OBJECT')
 first,second=mesh('First'),mesh('Second')
+# The authored Rig keeps the source-Mesh donor catalog separately from the
+# target object.  Extra/Tip are deliberately absent from First's local palette
+# but are valid slots on a sibling native Mesh.
+rig.data['eiem_source_bone_candidates_json']=json.dumps({
+    'Rig/Extra': [['assets/test/NativeDonor.asset','NativeDonor',0]],
+    'Rig/Extra/Tip': [['assets/test/NativeDonor.asset','NativeDonor',1]]})
 records=addon.skeleton_author_nodes(rig)
 assert [source for b,r,source in records]==[True,True,True,False,False]
 assert [r[0] for b,r,s in records][-2:]==['Rig/Extra','Rig/Extra/Tip']
@@ -190,7 +196,15 @@ reloaded_ini=configparser.ConfigParser(interpolation=None)
 reloaded_ini.read(package/'mod.ini',encoding='utf-8')
 reloaded_skeleton=package/reloaded_ini[reloaded_ini['RenderFirst']['skeleton']]['path']
 assert reloaded_skeleton.read_bytes()==original_skeleton
-assert (package/'meshes/MeshFirst.mesh').read_bytes()==new_file.read_bytes()
+reloaded_mesh=addon.read_mesh(package/'meshes/MeshFirst.mesh')
+original_mesh=addon.read_mesh(new_file)
+for field in ('skin','bindposes','bone_paths','bone_index_paths','bone_sources'):
+    assert reloaded_mesh[field]==original_mesh[field], field
+# Later authoring can add valid source donors without changing the vertex or
+# primary binding payload saved before reopening the .blend.
+for old,new in zip(original_mesh['bone_source_candidates'],
+                   reloaded_mesh['bone_source_candidates']):
+    assert set(old).issubset(new)
 
 # Two target resources may use author rigs whose copied section names collide.
 # Keep their files and Render associations distinct.

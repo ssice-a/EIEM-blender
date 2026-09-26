@@ -158,7 +158,7 @@ def read_mesh(path):
     if reader.take(8) != MAGIC_MESH:
         raise ValueError("not an EIEM mesh")
     version = reader.i32()
-    if version not in (2, 3, 4, 5):
+    if version not in (2, 3, 4, 5, 6):
         raise ValueError(f"unsupported EIEM mesh version {version}; re-export with the current AnimeStudio")
     coordinate = reader.string()
     source = reader.string()
@@ -192,6 +192,20 @@ def read_mesh(path):
     if version >= 5:
         bone_sources = [(reader.string(), reader.string(), reader.u32())
                         for _ in range(max(0, reader.i32()))]
+    bone_source_candidates = []
+    if version >= 6:
+        candidate_slots = reader.i32()
+        if candidate_slots < 0 or candidate_slots != len(bindposes):
+            raise ValueError("invalid mesh bone source candidate count")
+        bone_source_candidates = []
+        for _ in range(candidate_slots):
+            candidate_count = reader.i32()
+            if candidate_count <= 0 or candidate_count > 1024:
+                raise ValueError("mesh bone source slot has no candidates")
+            bone_source_candidates.append([
+                (reader.string(), reader.string(), reader.u32())
+                for _ in range(candidate_count)
+            ])
     blend_vertex_count = reader.i32()
     blend_vertices = []
     for _ in range(max(0, blend_vertex_count)):
@@ -224,6 +238,8 @@ def read_mesh(path):
         raise ValueError("mesh bone hierarchy-index palette does not match its bind poses")
     if bone_sources and len(bone_sources) != len(bindposes):
         raise ValueError("mesh bone source palette does not match its bind poses")
+    if bone_source_candidates and len(bone_source_candidates) != len(bindposes):
+        raise ValueError("mesh bone source candidates do not match its bind poses")
     if len(blend_weights) != len(blend_frames):
         raise ValueError("mesh BlendShape weights do not match its frames")
     if reader.pos != len(reader.data):

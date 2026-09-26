@@ -195,8 +195,9 @@ assert len(meshes) == 1, meshes
 assert len({parser[section]['mesh'] for section in renders}) == 1
 lod_mesh = addon.read_mesh(package / parser[meshes[0]]['path'])
 assert lod_mesh['name'] == 'SharedAsset_lod0', lod_mesh['name']
-assert {source[1] for source in lod_mesh['bone_sources']} == {
-    'SharedAsset_lod0'}, lod_mesh['bone_sources']
+assert lod_mesh['bone_sources'] and all(
+    source[1] == 'SharedAsset' for source in lod_mesh['bone_sources']
+), lod_mesh['bone_sources']
 
 # A part authored in another coordinate space cannot share one vertex buffer,
 # and must fail loudly instead of being silently reinterpreted.

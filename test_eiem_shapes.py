@@ -47,6 +47,7 @@ addon.EIEM_PT_shape_controls.draw(SimpleNamespace(layout=Layout()), bpy.context)
 bpy.ops.wm.save_as_mainfile(filepath=str(output / "author.blend"))
 bpy.ops.wm.open_mainfile(filepath=str(output / "author.blend"))
 obj = bpy.data.objects["Source"]
+control = obj.data.eiem_shape_controls[0]  # reload invalidates pre-save RNA references
 assert obj.data.eiem_shape_controls[0].shape == "Inflate"
 assert obj.data.eiem_shape_controls[0].label == "衣服鼓起"
 assert bpy.context.scene.eiem_ui_title == "衣服控制"
@@ -72,7 +73,12 @@ assert payload["blend_vertices"][0][1] == (0.0, 0.0, 0.5)
 # Template generation is optional, independent from shape data and controls.
 bpy.context.scene.eiem_ui_template = False
 addon.export_package(output / "no-ui", [obj], [])
-assert "[UIMod]" not in (output / "no-ui/mod.ini").read_text(encoding="utf-8")
+no_ui_ini = (output / "no-ui/mod.ini").read_text(encoding="utf-8")
+assert "[UIMod]" not in no_ui_ini
+assert "[ShapeControl1]" in no_ui_ini
+assert "variable=" + variable in no_ui_ini and "label=衣服鼓起" in no_ui_ini
+assert "min=0\nmax=1" in no_ui_ini
+assert "[KeyShape" not in no_ui_ini and "shape.Inflate=" + variable in no_ui_ini
 assert not (output / "no-ui/ui.lua").exists()
 # Directional shape keys are continuous hold bindings, not duplicate cycle
 # endpoints. The runtime advances the variable while the key is down.

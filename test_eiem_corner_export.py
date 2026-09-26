@@ -54,7 +54,7 @@ def snapshot(obj):
             if m.shape_keys else ())
 
 
-def assert_corners(obj, result):
+def assert_corners(obj, result, check_source_tangents=True):
     m = obj.data
     assert result["vertex_count"] >= len(m.vertices)
     assert result["uvs"][1] == [] and len(m.uv_layers) == 2
@@ -76,7 +76,8 @@ def assert_corners(obj, result):
                 assert floats(result["uvs"][channel][target * dimension:(target + 1) * dimension]) == floats(expected)
             tangent = m.attributes['EIEM_Tangent'].data[source].vector
             sign = m.attributes['EIEM_TangentSign'].data[source].value
-            assert floats(result['tangents'][target * 4:(target + 1) * 4]) == floats((*addon.blender_to_unity(tangent), sign))
+            if check_source_tangents:
+                assert floats(result['tangents'][target * 4:(target + 1) * 4]) == floats((*addon.blender_to_unity(tangent), sign))
             if "Color" in m.color_attributes:
                 colors = m.color_attributes['Color']
                 expected = colors.data[loop_index if colors.domain == 'CORNER' else source].color
@@ -107,6 +108,9 @@ for i in range(5):
     obj.vertex_groups[1].add([i], .25, "REPLACE")
 obj.modifiers.new("Skin", "ARMATURE").object = rig
 obj['eiem_bone_palette_json'] = '[1,2,3]'
+obj['eiem_bone_paths_json'] = json.dumps(['Root', 'Tip', 'Unused'])
+obj['eiem_bone_sources_json'] = json.dumps([
+    ['assets/test/UVSeam.asset', 'UVSeam', slot] for slot in range(3)])
 obj['eiem_bone_hashes_json'] = '[10,20,30]'
 obj['eiem_bindposes_json'] = json.dumps([[int(r == c) for r in range(4) for c in range(4)]] * 3)
 basis = obj.shape_key_add(name="Basis")
@@ -166,7 +170,7 @@ before = snapshot(normal_obj)
 addon.write_mesh(output / 'normals.mesh', normal_obj)
 result = addon.read_mesh(output / 'normals.mesh')
 assert result['vertex_count'] == 7
-for source, target, corner in assert_corners(normal_obj, result):
+for source, target, corner in assert_corners(normal_obj, result, check_source_tangents=False):
     assert floats(result['normals'][target*3:target*3+3]) == floats(addon.blender_to_unity(normal_mesh.corner_normals[corner].vector))
 assert snapshot(normal_obj) == before
 

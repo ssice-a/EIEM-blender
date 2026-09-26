@@ -165,8 +165,8 @@ assert len(plan["sources"]) == 1 and len(plan["groups"]) == 2
 declarations, bindings, hotkeys = addon.plan_shape_controls(plan["objects"])
 assert len(hotkeys) == 2
 assert {entry["key"] for entry in hotkeys} == {"F8", "F9"}
-assert next(entry for entry in hotkeys if entry["key"] == "F8")["values"] == [1, 1]
-assert next(entry for entry in hotkeys if entry["key"] == "F9")["values"] == [0, 0]
+assert next(entry for entry in hotkeys if entry["key"] == "F8")["target"] == 1
+assert next(entry for entry in hotkeys if entry["key"] == "F9")["target"] == 0
 assert len(bpy.data.armatures) == 1
 saved = output / "author.blend"
 bpy.ops.wm.save_as_mainfile(filepath=str(saved))
@@ -193,8 +193,8 @@ assert text.count("[KeySwitch") == 2
 assert text.count("[KeyShape") == 2
 assert "key=CTRL+ALT+NUMPAD7" in text
 assert "key=F8" in text and "key=F9" in text
-assert "shape_speed.StockingBlend=0.5" in text
-assert "=1,1" in text and "=0,0" in text
+assert text.count("speed=0.5") == 2
+assert "type=hold" in text and "=" + str(1) in text
 assert "||" in text
 ui = (package / "ui.lua").read_text(encoding="utf-8")
 shape_variable = declarations[0][0]

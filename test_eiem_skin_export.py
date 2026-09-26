@@ -29,6 +29,9 @@ def mesh(name, paths):
     data=bpy.data.meshes.new(name)
     data.from_pydata([(0,0,0),(1,0,0),(0,1,0)],[],[(0,1,2)])
     data['eiem_section']='Mesh'+name; data['eiem_asset']=name
+    data['eiem_source']='assets/test/%s.mesh' % name
+    data['eiem_target_path']=data['eiem_source']
+    data['eiem_target_asset']=name
     obj=bpy.data.objects.new(name,data); bpy.context.scene.collection.objects.link(obj)
     obj.modifiers.new('Skin','ARMATURE').object=rig
     obj['eiem_bone_palette_json']=json.dumps([by_path[p] for p in paths])
@@ -38,7 +41,7 @@ def mesh(name, paths):
     return obj
 
 obj=mesh('Body',['Root','Root/Unused'])
-donor=mesh('OtherPart',['Root','Root/Pelvis','Root/Pelvis/Foot'])
+donor=mesh('OtherPart',['Root','Root/Pelvis','Root/Pelvis/Foot','Root/Accessory'])
 for name in ('Root','Unused','Pelvis','Foot','Accessory'):
     obj.vertex_groups.new(name=name)
 obj.vertex_groups['Pelvis'].add([0],1,'REPLACE')
@@ -50,7 +53,10 @@ addon.write_mesh(file,obj)
 result=addon.read_mesh(file)
 assert result['bind_count']==5, result['bind_count']
 assert result['bone_paths'][:2]==['Root','Root/Unused']
-assert result['bone_index_paths']==['','0','1','1/0','2'], result['bone_index_paths']
+assert dict(zip(result['bone_paths'], result['bone_index_paths'])) == {
+    'Root': '', 'Root/Unused': '0', 'Root/Pelvis': '1',
+    'Root/Pelvis/Foot': '1/0', 'Root/Accessory': '2',
+}, result['bone_index_paths']
 assert result['bindposes'][:2]==[poses['Root'],poses['Root/Unused']]
 for vertex,name in enumerate(('Root/Pelvis','Root/Pelvis/Foot','Root/Accessory')):
     weights,indices=result['skin'][vertex]
@@ -62,6 +68,11 @@ assert json.loads(obj['eiem_bone_palette_json'])==[by_path['Root'],by_path['Root
 obj['eiem_bone_sources_json'] = json.dumps([
     ['assets/a.mesh', 'MeshA', 3], ['assets/a.mesh', 'MeshA', 7]])
 assert json.loads(obj['eiem_bone_sources_json'])[1][2] == 7
+addon.write_mesh(file,obj)
+with_sources = addon.read_mesh(file)
+assert with_sources['skin'] == result['skin']
+assert ('assets/a.mesh', 'MeshA', 3) in with_sources['bone_source_candidates'][0]
+assert ('assets/a.mesh', 'MeshA', 7) in with_sources['bone_source_candidates'][1]
 first=file.read_bytes(); addon.write_mesh(file,obj); assert file.read_bytes()==first
 
 # Donor meshes may have another bind frame. Convert using common original

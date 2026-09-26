@@ -635,8 +635,6 @@ def generate_mod_ui(groups, shape_controls, shape_hotkeys=None, scene=None):
     shape_hotkeys = shape_hotkeys or []
     key = (validate_switch_key(scene.eiem_ui_key)
            if scene.eiem_ui_key.strip() else "")
-    if key.split('+')[-1] == 'INSERT':
-        raise ValueError("Mod UI 不使用 INSERT，请修改 UI 开关键")
     if any(key == group[3] for group in groups):
         raise ValueError("Mod UI 开关键与切换组按键重复，请修改 UI 开关键")
     if any(key == control["key"] for control in shape_hotkeys):

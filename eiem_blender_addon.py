@@ -19,6 +19,7 @@ import tempfile
 import math
 import uuid
 import importlib.util
+import threading
 from pathlib import Path
 from collections import defaultdict
 
@@ -28,11 +29,16 @@ from bpy_extras.io_utils import ImportHelper, ExportHelper
 from mathutils import Matrix, Quaternion, Vector
 
 if __package__:
+    from . import eiem_release as release_check
     from . import eiem_format as format_io
     from . import eiem_lod as lod
     from . import eiem_physics_authoring as physics_authoring
     from . import eiem_blender_controls as controls
 else:
+    _release_spec = importlib.util.spec_from_file_location(
+        "eiem_release", Path(__file__).with_name("eiem_release.py"))
+    release_check = importlib.util.module_from_spec(_release_spec)
+    _release_spec.loader.exec_module(release_check)
     _format_spec = importlib.util.spec_from_file_location(
         "eiem_format", Path(__file__).with_name("eiem_format.py"))
     format_io = importlib.util.module_from_spec(_format_spec)
@@ -868,6 +874,8 @@ def import_package(root, clean=False, include_physics=False, physics_file=""):
             payload.get("bone_index_paths", []), separators=(",", ":"))
         obj["eiem_bone_sources_json"] = json.dumps(
             payload.get("bone_sources", []), separators=(",", ":"))
+        obj["eiem_bone_source_candidates_json"] = json.dumps(
+            payload.get("bone_source_candidates", []), separators=(",", ":"))
         obj.data["eiem_original_vertex_count"] = int(payload["vertex_count"])
         import_blend_shapes(obj, payload)
     for section, values in resources.items():
@@ -1240,10 +1248,85 @@ def shared_skin_bindings(armature):
     return records
 
 
+def _unique_source_donors(values):
+    donors = []
+    for value in values:
+        if (not isinstance(value, (list, tuple)) or len(value) != 3 or
+                not str(value[0]).strip() or not str(value[1]).strip()):
+            continue
+        try:
+            candidate = (str(value[0]), str(value[1]), int(value[2]))
+        except (TypeError, ValueError):
+            continue
+        if candidate not in donors:
+            donors.append(candidate)
+    return donors
+
+
+def _source_candidates_for_object(obj, armature):
+    """Return native Mesh palette donors keyed by authored bone path.
+
+    A replacement may add a group that was present on a sibling native Mesh.
+    The donor identity is kept as Mesh/slot metadata, never inferred from a
+    bone name or from this object's local palette order.
+    """
+    paths = parse_json_property(obj, "eiem_bone_paths_json", [])
+    if not paths:
+        return {}
+    raw_candidates = parse_json_property(
+        obj, "eiem_bone_source_candidates_json", [])
+    raw_sources = parse_json_property(obj, "eiem_bone_sources_json", [])
+    original_palette = parse_json_property(obj, "eiem_bone_palette_json", [])
+    source_path = str(obj.data.get("eiem_target_path",
+                                  obj.data.get("eiem_source", ""))).strip()
+    source_asset = str(obj.data.get("eiem_target_asset",
+                                  obj.data.get("eiem_asset", obj.name))).strip()
+    result = {}
+    for slot, path in enumerate(paths):
+        values = []
+        if len(raw_candidates) == len(paths) and isinstance(raw_candidates[slot], list):
+            values = raw_candidates[slot]
+        elif slot < len(raw_sources):
+            values = [raw_sources[slot]]
+        elif (not raw_sources and source_path and source_asset and
+              slot < len(original_palette)):
+            values = [[source_path, source_asset, slot]]
+        donors = _unique_source_donors(values)
+        if donors:
+            result[str(path)] = donors
+    return result
+
+
+def shared_bone_source_candidates(armature):
+    """Collect every native Mesh/slot donor in this Blender armature scene."""
+    records = parse_json_property(
+        armature.data, "eiem_source_bone_candidates_json", {})
+    if not isinstance(records, dict):
+        records = {}
+    # JSON restores tuple donors as lists. Canonicalise the saved catalog on
+    # every export so tuple donors from scene objects cannot multiply it.
+    records = {str(path): donors for path, values in records.items()
+               if (donors := _unique_source_donors(values if isinstance(values, list) else []))}
+    for other in sorted(bpy.data.objects, key=lambda item: item.name):
+        if other.type != "MESH" or other.find_armature() != armature:
+            continue
+        for path, candidates in _source_candidates_for_object(other, armature).items():
+            target = records.setdefault(path, [])
+            for candidate in candidates:
+                if candidate not in target:
+                    target.append(candidate)
+    # Keep the authoring-side donor catalog with the shared Armature.  A user
+    # may hide or delete a source object after importing it; exports still
+    # retain the exact source identities observed before that edit.
+    armature.data["eiem_source_bone_candidates_json"] = json.dumps(
+        records, separators=(",", ":"))
+    return records
+
+
 def armature_bone_index_paths(armature, paths):
     """Stable Transform child-index paths for cross-prefab bone resolution."""
     bones = list(armature.data.bones)
-    by_path = {str(bone.get("eiem_path", bone.name)): bone for bone in bones}
+    by_path = {record[0]: bone for bone, record, _ in skeleton_author_nodes(armature)}
     result = []
     for path in paths:
         bone = by_path.get(path)
@@ -1281,7 +1364,8 @@ def export_skin_binding(obj, armature, source_vertices):
                 parse_json_property(obj, "eiem_bone_hashes_json", []),
                 parse_json_property(obj, "eiem_bone_paths_json", []),
                 parse_json_property(obj, "eiem_bone_index_paths_json", []),
-                parse_json_property(obj, "eiem_bone_sources_json", []))
+                parse_json_property(obj, "eiem_bone_sources_json", []),
+                parse_json_property(obj, "eiem_bone_source_candidates_json", []))
     original = source_skin_binding(obj, armature)
     hashes = [int(x) for x in parse_json_property(obj, "eiem_bone_hashes_json", [])]
     if not original or len(hashes) != len(original):
@@ -1370,20 +1454,20 @@ def export_skin_binding(obj, armature, source_vertices):
         skin_by_vertex.append((tuple(w for w,i in influences),tuple(i for w,i in influences)))
     if reduced:
         print("[EIEM] %s: %d vertices reduced to the four strongest normalized skin influences" % (obj.name,reduced))
-    source_path = str(obj.data.get("eiem_target_path", obj.data.get("eiem_source", "")))
-    source_asset = str(obj.data.get("eiem_target_asset", obj.data.get("eiem_asset", obj.name)))
-    original_sources = parse_json_property(obj, "eiem_bone_sources_json", [])
-    sources = list(original_sources)
-    if not sources:
-        sources = [[source_path, source_asset, index] for index in range(len(paths))]
-    if len(sources) != len(paths):
-        raise ValueError("%s 的骨骼来源槽数量与骨骼绑定不一致" % obj.name)
-    for source in sources:
-        if len(source) != 3 or not str(source[0]).strip() or not str(source[1]).strip():
-            raise ValueError("%s 的骨骼来源槽记录不完整" % obj.name)
+    catalog = shared_bone_source_candidates(armature)
+    source_candidates = []
+    for path in paths:
+        candidates = list(catalog.get(path, []))
+        if not candidates:
+            raise ValueError(
+                "%s 骨骼 %s 没有任何原生 Mesh 供体槽；当前 Mesh 阶段不能伪造槽号"
+                % (obj.name, path))
+        source_candidates.append(candidates)
+    sources = [candidates[0] for candidates in source_candidates]
     return ([skin_by_vertex[i] for i in source_vertices],
             [matrices[p] for p in paths], hashes, paths,
-            armature_bone_index_paths(armature, paths), sources)
+            armature_bone_index_paths(armature, paths), sources,
+            source_candidates)
 
 
 def write_mesh(path, obj):
@@ -1465,11 +1549,12 @@ def write_mesh(path, obj):
 
     armature = next((modifier.object for modifier in obj.modifiers
                      if modifier.type == "ARMATURE" and modifier.object), None)
-    skin, bindposes, bone_hashes, bone_paths, bone_index_paths, bone_sources = export_skin_binding(
+    (skin, bindposes, bone_hashes, bone_paths, bone_index_paths,
+     bone_sources, bone_source_candidates) = export_skin_binding(
         obj, armature, source_vertices)
     blend_vertices, blend_frames, blend_channels, blend_weights, additional = export_blend_shapes(obj, to_source, source_vertices)
 
-    writer = Writer(); writer.raw(MAGIC_MESH); writer.i32(5)
+    writer = Writer(); writer.raw(MAGIC_MESH); writer.i32(6)
     writer.string(coordinate)
     writer.string(obj.data.get("eiem_source", "")); writer.string(obj.data.get("eiem_asset", obj.name))
     writer.i32(len(source_vertices)); writer.floats(vertices); writer.floats(normals)
@@ -1499,6 +1584,11 @@ def write_mesh(path, obj):
     writer.i32(len(bone_sources))
     for source in bone_sources:
         writer.string(source[0]); writer.string(source[1]); writer.u32(source[2])
+    writer.i32(len(bone_source_candidates))
+    for candidates in bone_source_candidates:
+        writer.i32(len(candidates))
+        for source in candidates:
+            writer.string(source[0]); writer.string(source[1]); writer.u32(source[2])
     writer.i32(len(blend_vertices))
     for index, position, normal, tangent in blend_vertices:
         writer.u32(index)
@@ -1601,7 +1691,8 @@ def write_merged_mesh(output, objects):
                 triangle = (triangle[0], triangle[2], triangle[1])
             by_slot.setdefault(slot, []).extend(triangle)
 
-        skin, bindposes, bone_hashes, bone_paths, bone_index_paths, bone_sources = export_skin_binding(
+        (skin, bindposes, bone_hashes, bone_paths, bone_index_paths,
+         bone_sources, bone_source_candidates) = export_skin_binding(
             obj, obj.find_armature(), source_vertices)
         parts.append({
             "obj": obj,
@@ -1616,6 +1707,7 @@ def write_merged_mesh(output, objects):
             "bone_hashes": bone_hashes, "bone_paths": bone_paths,
             "bone_index_paths": bone_index_paths,
             "bone_sources": bone_sources,
+            "bone_source_candidates": bone_source_candidates,
         })
 
     # One Mesh has one joint palette. Sibling parts routinely address different
@@ -1632,7 +1724,8 @@ def write_merged_mesh(output, objects):
         # All per-slot identities share the part's local palette order.
         if not (len(part["bindposes"]) == len(part["bone_paths"]) ==
                 len(part["bone_hashes"]) == len(part["bone_index_paths"]) ==
-                len(part["bone_sources"])):
+                len(part["bone_sources"]) ==
+                len(part["bone_source_candidates"])):
             raise ValueError(
                 "网格 %s 的骨骼路径/绑定矩阵/哈希数量不一致" % part["obj"].name)
         part["remap"] = [palette_index[name] for name in part["bone_paths"]]
@@ -1663,6 +1756,7 @@ def write_merged_mesh(output, objects):
         raise ValueError("合并的关节调色盘有不存在的骨骼哈希")
     index_paths = [None] * len(palette_paths)
     sources = [None] * len(palette_paths)
+    source_candidates = [None] * len(palette_paths)
     for part in parts:
         for own_slot, union_slot in enumerate(part["remap"]):
             value = part["bone_index_paths"][own_slot]
@@ -1676,11 +1770,16 @@ def write_merged_mesh(output, objects):
         raise ValueError("合并的关节调色盘缺少骨骼层级索引")
     for part in parts:
         for own_slot, union_slot in enumerate(part["remap"]):
-            source = part["bone_sources"][own_slot]
-            if sources[union_slot] is None:
-                sources[union_slot] = source
-            elif sources[union_slot] != source:
-                raise ValueError("merged bone source slots disagree")
+            candidates = part["bone_source_candidates"][own_slot]
+            if source_candidates[union_slot] is None:
+                source_candidates[union_slot] = []
+            for candidate in candidates:
+                if candidate not in source_candidates[union_slot]:
+                    source_candidates[union_slot].append(candidate)
+    for slot, candidates in enumerate(source_candidates):
+        if not candidates:
+            raise ValueError("merged palette is missing bone source candidates")
+        sources[slot] = candidates[0]
     if any(value is None for value in sources):
         raise ValueError("merged palette is missing bone source slots")
     channels = {part["channels"] for part in parts}
@@ -1724,7 +1823,7 @@ def write_merged_mesh(output, objects):
                          [part["remap"][int(b)] for b in bones_value]))
         vertex_offset += part["count"]
 
-    writer = Writer(); writer.raw(MAGIC_MESH); writer.i32(5)
+    writer = Writer(); writer.raw(MAGIC_MESH); writer.i32(6)
     writer.string(coordinate)
     writer.string(parts[0]["obj"].data.get("eiem_source", ""))
     writer.string(parts[0]["obj"].data.get("eiem_asset", parts[0]["obj"].name))
@@ -1753,6 +1852,11 @@ def write_merged_mesh(output, objects):
     writer.i32(len(sources))
     for source in sources:
         writer.string(source[0]); writer.string(source[1]); writer.u32(source[2])
+    writer.i32(len(source_candidates))
+    for candidates in source_candidates:
+        writer.i32(len(candidates))
+        for source in candidates:
+            writer.string(source[0]); writer.string(source[1]); writer.u32(source[2])
     # Blend shapes keep their part-local vertex indices shifted by that part's
     # base offset, exactly like the geometry they displace.
     writer.i32(0); writer.i32(0); writer.i32(0); writer.floats([]); writer.i32(0)
@@ -2683,6 +2787,15 @@ def write_export_package(root, plan, armatures, physics_objects=None,
         for variable, label, default, minimum, maximum in shape_controls:
             resource_lines.append("persist %s=%.9g" % (variable, default))
         resource_lines.append("")
+        for index, (variable, label, default, minimum, maximum) in enumerate(shape_controls, 1):
+            resource_lines.extend([
+                "[ShapeControl%d]" % index,
+                "variable=" + variable,
+                "label=" + label,
+                "min=%.9g" % minimum,
+                "max=%.9g" % maximum,
+                "",
+            ])
         for index, (group, states, default, key, variable) in enumerate(switch_groups, 1):
             key_lines = [
                 "; " + group.name.replace("\n", " ").replace("\r", " "),
@@ -3852,6 +3965,104 @@ class EIEM_OT_export_mesh_only(ExportHelper, bpy.types.Operator):
         draw_lod_options(self.layout, self)
 
 
+_update_state = {"status": "idle", "tag": "", "url": "", "message": ""}
+_update_worker = None
+
+
+def _addon_preferences(context):
+    name = (__package__ or __name__).split(".")[0]
+    addon = context.preferences.addons.get(name)
+    return addon.preferences if addon else None
+
+
+class EIEM_AddonPreferences(bpy.types.AddonPreferences):
+    bl_idname = (__package__ or __name__).split(".")[0]
+
+    ignored_release_tag: StringProperty(name="Ignored release", default="")
+
+    def draw(self, context):
+        layout = self.layout
+        row = layout.row()
+        row.enabled = _update_state["status"] != "checking"
+        row.operator("eiem.check_update", text="检查更新", icon='FILE_REFRESH')
+        status = _update_state["status"]
+        if status == "checking":
+            layout.label(text="正在检查 GitHub Release...")
+        elif status == "latest":
+            layout.label(text="已是最新版本")
+        elif status == "available":
+            layout.label(text="发现新版本 " + _update_state["tag"])
+            row = layout.row()
+            row.operator("eiem.open_update_release", text="查看 Release", icon='URL')
+            row.operator("eiem.ignore_update_release", text="忽略此版本", icon='HIDE_ON')
+        elif status == "ignored":
+            layout.label(text="已忽略 " + _update_state["tag"])
+            layout.operator("eiem.check_update", text="仍要查看此版本").force = True
+        elif status == "error":
+            layout.label(text="检查失败：" + _update_state["message"], icon='ERROR')
+
+
+class EIEM_OT_check_update(bpy.types.Operator):
+    bl_idname = "eiem.check_update"
+    bl_label = "检查 EIEM 更新"
+    force: BoolProperty(default=False)
+
+    def execute(self, context):
+        global _update_worker
+        if _update_worker and _update_worker.is_alive():
+            return {'CANCELLED'}
+        prefs = _addon_preferences(context)
+        ignored = prefs.ignored_release_tag if prefs else ""
+        force = bool(self.force)
+        _update_state.update(status="checking", tag="", url="", message="")
+
+        def work():
+            try:
+                result = release_check.check_release(bl_info["version"], ignored, force)
+                _update_state.update(result, message="")
+            except Exception as error:
+                _update_state.update(status="error", message=str(error)[:120])
+
+        _update_worker = threading.Thread(target=work, name="EIEM release check", daemon=True)
+        _update_worker.start()
+
+        def redraw_when_done():
+            if _update_worker and _update_worker.is_alive():
+                return 0.1
+            for window in bpy.context.window_manager.windows:
+                for area in window.screen.areas:
+                    area.tag_redraw()
+            return None
+
+        bpy.app.timers.register(redraw_when_done, first_interval=0.1)
+        return {'FINISHED'}
+
+
+class EIEM_OT_open_update_release(bpy.types.Operator):
+    bl_idname = "eiem.open_update_release"
+    bl_label = "打开 EIEM Release"
+
+    def execute(self, context):
+        if _update_state["status"] != "available":
+            return {'CANCELLED'}
+        bpy.ops.wm.url_open(url=_update_state["url"])
+        return {'FINISHED'}
+
+
+class EIEM_OT_ignore_update_release(bpy.types.Operator):
+    bl_idname = "eiem.ignore_update_release"
+    bl_label = "忽略此 EIEM 版本"
+
+    def execute(self, context):
+        prefs = _addon_preferences(context)
+        if not prefs or _update_state["status"] != "available":
+            return {'CANCELLED'}
+        prefs.ignored_release_tag = _update_state["tag"]
+        _update_state["status"] = "ignored"
+        bpy.ops.wm.save_userpref()
+        return {'FINISHED'}
+
+
 def menu_import(self, context):
     self.layout.operator(EIEM_OT_import.bl_idname, text="EIEM Mod 包")
 
@@ -3862,6 +4073,10 @@ def menu_export(self, context):
 
 
 classes = (
+    EIEM_AddonPreferences,
+    EIEM_OT_check_update,
+    EIEM_OT_open_update_release,
+    EIEM_OT_ignore_update_release,
     EIEM_OT_import_material,
     EIEM_PG_shape_control,
     EIEM_OT_shape_control,

@@ -65,6 +65,10 @@ assert max(addon.switch_state_values(group))>max(old_values)
 def package(name):
     root=output/name;(root/"materials").mkdir(parents=True);(root/"textures").mkdir()
     image=bpy.data.images.new("Fixture",width=2,height=2)
+    # Distinct resources need distinct pixels. Byte-identical imports are
+    # intentionally inherited from the native material by the exporter.
+    color=(1.0,0.0,0.0,1.0) if name=="role-a" else (0.0,0.0,1.0,1.0)
+    image.pixels[:]=list(color)*4
     image.filepath_raw=str(root/"textures/shared.png");image.file_format="PNG";image.save()
     bpy.data.images.remove(image)
     (root/"mod.ini").write_text("[MaterialSame]\npath=materials/shared.mat\n[TextureSame]\npath=textures/shared.png\nlinear=true\n",encoding="utf-8")

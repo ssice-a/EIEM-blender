@@ -13,12 +13,26 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Verify release tag matches Blender version
+        run: |
+          python - <<'PY'
+          import ast, os
+          source = ast.parse(open('__init__.py', encoding='utf-8').read())
+          info = next(ast.literal_eval(node.value) for node in source.body
+                      if isinstance(node, ast.Assign)
+                      and any(isinstance(target, ast.Name) and target.id == 'bl_info'
+                              for target in node.targets))
+          expected = 'v' + '.'.join(map(str, info['version']))
+          actual = os.environ['GITHUB_REF_NAME']
+          if actual != expected:
+              raise SystemExit(f'Tag {actual} does not match Blender {expected}')
+          PY
       - name: Build add-on archive
         shell: pwsh
         run: |
           $package = "EIEM_Blender"
           New-Item -ItemType Directory -Force -Path $package | Out-Null
-          Copy-Item __init__.py,eiem_blender_addon.py,eiem_blender_controls.py,eiem_format.py,eiem_lod.py,eiem_physics_authoring.py,eiem_physics_document.py,eiem_physics_native.py,eiem_physics_source.py,README.md,LICENSE,THIRD_PARTY_NOTICES -Destination $package
+          Copy-Item __init__.py,eiem_blender_addon.py,eiem_blender_controls.py,eiem_release.py,eiem_format.py,eiem_lod.py,eiem_physics_authoring.py,eiem_physics_document.py,eiem_physics_native.py,eiem_physics_source.py,README.md,LICENSE,THIRD_PARTY_NOTICES -Destination $package
           Compress-Archive -Path $package -DestinationPath "EIEM_Blender_${{ github.ref_name }}.zip"
       - uses: softprops/action-gh-release@v2
         with:

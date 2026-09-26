@@ -8,7 +8,12 @@ EIEM 的 Blender 作者工具。它读取 AnimeStudio 解包出的 EIEM 资源�
 
 三端通过文件协议连接，不互相复制源码。格式变化应先更新 EIEM 主仓库中的协议文档，再分别更新生产端和消费端。
 
+插件设置里有“检查更新”按钮：手动查询本仓库最新正式 Release，显示版本及下载入口。
+可以忽略某一版本，遇到下一版本仍会提示；插件不会自行下载或覆盖安装。
+
 ## 安装与开发
+
+从 [EIEM Blender Releases](https://github.com/ssice-a/EIEM-blender/releases) 下载插件 ZIP。在 Blender 的插件设置中选择“从磁盘安装”，直接选择 ZIP；无需先解压。升级前在插件设置中移除旧版 EIEM，避免同时加载两份。
 
 发布包应包含以下运行文件：
 
@@ -67,9 +72,9 @@ UV 接缝、顶点色、切线和多维 UV 会按面角拆分输出顶点，不�
 
 ## 蒙皮与共享骨架
 
-EIEMESH v5 保存每个局部骨骼槽的“源 Mesh 身份 + 原始槽号”。导出器保留全部原槽，只在末尾追加新增槽。DLL 在当前 NPC、UI 或大世界实例内，从对应原生 Mesh 的 `bones[]` 解析 Transform，因此不依赖三个 PFB 使用完全相同的骨骼名称，也不会跨实例借用骨骼。
+EIEMESH v6 保存每个局部骨骼槽的“源 Mesh 身份 + 原始槽号候选”。导出器保留全部原槽，只在末尾追加新增槽；新增槽必须能在同一 Armature 的原生 Mesh 供体中找到。DLL 在当前 NPC、UI 或大世界实例内，从对应原生 Mesh 的 `bones[]` 解析 Transform，因此不依赖三个 PFB 使用完全相同的骨骼名称，也不会跨实例借用骨骼。
 
-当前每个顶点保存四个最强影响并归一化。缺失正权重骨骼、无权重面顶点或损坏的源槽会明确报错。旧 EIEMESH v2–v4 不具备跨 PFB 改名保证，应重新导入并导出为 v5。
+当前每个顶点保存四个最强影响并归一化。缺失正权重骨骼、无权重面顶点或损坏的源槽会明确报错。旧 EIEMESH v2–v5 保留兼容读取，但 v2–v4 不具备跨 PFB 改名保证，应重新导入并导出为 v6。
 
 详细契约见 [共享骨架绑定](https://github.com/ssice-a/EIEM/blob/main/docs/shared-skeleton-binding.md)。
 
