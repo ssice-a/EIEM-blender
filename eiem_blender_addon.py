@@ -1,7 +1,7 @@
 bl_info = {
     "name": "EIEM Resource Package",
     "author": "EIEM",
-    "version": (0, 33, 0),
+    "version": (0, 34, 0),
     "blender": (3, 0, 0),
     "location": "File > Import/Export > EIEM package",
     "category": "Import-Export",
@@ -2173,6 +2173,13 @@ def prepare_export_root(root):
                 candidate = (root / directory).resolve()
                 if candidate.parent == root and candidate.is_dir():
                     shutil.rmtree(candidate)
+            generated_ui = root / "ui.lua"
+            if generated_ui.is_file():
+                first_ui_line = generated_ui.read_text(
+                    encoding="utf-8-sig", errors="replace").splitlines()[:1]
+                if first_ui_line == [
+                    "-- Optional Blender template. All window behavior belongs to this Lua file."]:
+                    generated_ui.unlink()
     root.mkdir(parents=True, exist_ok=True)
     return root
 
@@ -2458,8 +2465,7 @@ def package_physics_dependencies(plan, armatures, physics_objects):
 
 
 def export_package(root, mesh_objects=None, armatures=None, physics_objects=None,
-                   apply_static_switches=True, mesh_only=False,
-                   lod_levels=None):
+                   mesh_only=False, lod_levels=None, include_switches=True):
     if mesh_objects is None:
         if physics_objects is None:
             physics_objects = selected_eiem_physics()
@@ -2467,8 +2473,6 @@ def export_package(root, mesh_objects=None, armatures=None, physics_objects=None
         if armatures is None:
             armatures = selected_armatures
     mesh_objects = list(mesh_objects or [])
-    if apply_static_switches and not mesh_only and not switch_export_enabled():
-        mesh_objects = static_switch_selection(mesh_objects)
     armatures = list(armatures or [])
     if mesh_only:
         # Mesh-only is explicit: keep the mesh's existing skin payload, but do
@@ -2480,7 +2484,8 @@ def export_package(root, mesh_objects=None, armatures=None, physics_objects=None
     if bpy.context.mode != "OBJECT":
         raise ValueError("请回到物体模式后导出")
     plan = (plan_mesh_only_export(mesh_objects)
-            if mesh_only else plan_switch_export(mesh_objects))
+            if mesh_only else plan_switch_export(
+                mesh_objects, include_switches=include_switches))
     if lod_levels is not None:
         plan = expand_lod_plan(plan, lod_levels)
     if not mesh_only:
@@ -2506,7 +2511,8 @@ def export_package(root, mesh_objects=None, armatures=None, physics_objects=None
         staging = Path(temporary)
         stats = write_export_package(
             staging, plan, armatures, physics_objects,
-            include_rig=not mesh_only, mesh_only=mesh_only)
+            include_rig=not mesh_only, mesh_only=mesh_only,
+            include_switches=include_switches)
         root = prepare_export_root(destination)
         for item in staging.iterdir():
             if item.is_dir():
@@ -2523,16 +2529,13 @@ def export_visible_package(root, context=None):
     if not meshes:
         raise ValueError("No visible EIEM mesh objects found")
     previous_rig = os.environ.get("EIEM_DISABLE_RIG_EXPORT")
-    previous_switch = os.environ.get("EIEM_DISABLE_SWITCH_EXPORT")
     os.environ["EIEM_DISABLE_RIG_EXPORT"] = "1"
-    os.environ["EIEM_DISABLE_SWITCH_EXPORT"] = "1"
     try:
         return export_package(
             root,
             mesh_objects=meshes,
             armatures=[],
             physics_objects=[],
-            apply_static_switches=False,
             mesh_only=True,
         )
     finally:
@@ -2540,10 +2543,6 @@ def export_visible_package(root, context=None):
             os.environ.pop("EIEM_DISABLE_RIG_EXPORT", None)
         else:
             os.environ["EIEM_DISABLE_RIG_EXPORT"] = previous_rig
-        if previous_switch is None:
-            os.environ.pop("EIEM_DISABLE_SWITCH_EXPORT", None)
-        else:
-            os.environ["EIEM_DISABLE_SWITCH_EXPORT"] = previous_switch
 
 
 def merged_source_keys(mesh_objects, plan):
@@ -2563,39 +2562,10 @@ def merged_source_keys(mesh_objects, plan):
     return {key for key, count in groups.items() if count >= 2}
 
 
-def switch_export_enabled():
-    """Whether switch groups should be emitted into the generated package.
-
-    The authoring data remains in the .blend either way.  This export-only
-    switch lets the static assembly path be tested without changing the
-    runtime state machine or hand-editing the generated INI.
-    """
-    return os.environ.get("EIEM_DISABLE_SWITCH_EXPORT", "").strip() not in (
-        "1", "true", "yes")
-
-
 def rig_export_enabled():
     """Whether Skeleton/Physics resource files are emitted by this export."""
     return os.environ.get("EIEM_DISABLE_RIG_EXPORT", "").strip() not in (
         "1", "true", "yes")
-
-
-def static_switch_selection(mesh_objects):
-    """Keep only each switch group's authored default state for a static export."""
-    selected = set(mesh_objects)
-    grouped = set()
-    defaults = set()
-    for group in switch_groups():
-        states = switch_states(group)
-        default = next((state for state in states
-                        if state.get("eiem_default")), None)
-        if default is None:
-            raise ValueError("切换组%s没有默认状态" % group.name)
-        members = set(switch_members(group))
-        grouped.update(members)
-        defaults.update(obj for obj in switch_meshes(default) if obj in selected)
-    return [obj for obj in mesh_objects
-            if obj not in grouped or obj in defaults]
 
 
 def build_merged_action(mesh_objects, plan, root, object_actions, shape_bindings,
@@ -2728,7 +2698,7 @@ def append_submesh_visibility(lines, binding, start, end):
 
 
 def write_export_package(root, plan, armatures, physics_objects=None,
-                         include_rig=True, mesh_only=False):
+                         include_rig=True, mesh_only=False, include_switches=True):
     # A hidden selection declares skip only: its geometry, materials, textures
     # and shape controls must not become resource dependencies.
     mesh_objects = [o for o in plan["objects"] if o not in plan["hidden"]]
@@ -2790,8 +2760,9 @@ def write_export_package(root, plan, armatures, physics_objects=None,
         shape_controls, shape_bindings, shape_hotkeys = [], {}, []
         switches_enabled = False
     else:
-        shape_controls, shape_bindings, shape_hotkeys = plan_shape_controls(mesh_objects)
-        switches_enabled = switch_export_enabled()
+        shape_controls, shape_bindings, shape_hotkeys = plan_shape_controls(
+            mesh_objects, include_hotkeys=include_switches)
+        switches_enabled = include_switches
     switch_groups = plan["groups"] if switches_enabled else []
     switch_bindings = plan["bindings"] if switches_enabled else {}
     if not switches_enabled:
@@ -2802,7 +2773,8 @@ def write_export_package(root, plan, armatures, physics_objects=None,
             raise ValueError("多个控制使用同一快捷键：" + control["key"])
         used_hotkeys.add(control["key"])
     ui_payload = generate_mod_ui(
-        switch_groups, shape_controls, shape_hotkeys
+        switch_groups, shape_controls, shape_hotkeys,
+        include_hotkeys=switches_enabled
     ) if bpy.context.scene.eiem_ui_template else None
     if switch_groups or shape_controls or ui_payload:
         resource_lines.append("[Constants]")
@@ -2968,7 +2940,7 @@ def write_export_package(root, plan, armatures, physics_objects=None,
             # Mesh. A switch changes only the corresponding submesh index
             # buffers, preserving the game's skeleton/LOD/physics ownership.
             render_lines.extend(["[" + root_render + "]", "asset=" + asset])
-            render_lines.extend(object_actions[first])
+            render_lines.extend(object_actions[merged["members"][0]])
             for member in merged["members"]:
                 start, end = merged["slot_ranges"][member]
                 append_submesh_visibility(
@@ -3890,6 +3862,9 @@ class EIEM_OT_export(ExportHelper, bpy.types.Operator):
     filename_ext = ""
     directory: StringProperty(subtype="DIR_PATH")
     scope_message: StringProperty(options={"HIDDEN"})
+    include_switches: BoolProperty(
+        name="导出按键切换", default=True,
+        description="导出款式切换及快捷键；取消后只导出默认款式，保留形态键与滑块控制")
     lod_all: BoolProperty(name="导出已发现的全部 LOD", default=True)
     lod0: BoolProperty(name="LOD0", default=True)
     lod1: BoolProperty(name="LOD1", default=False)
@@ -3903,12 +3878,14 @@ class EIEM_OT_export(ExportHelper, bpy.types.Operator):
     def invoke(self, context, event):
         try:
             meshes, _ = selected_eiem_resources(context)
-            plan = plan_switch_export(meshes, context.scene)
+            plan = plan_mesh_only_export(meshes)
             physics = selected_eiem_physics(context)
             levels = self._lod_levels(meshes)
             self.scope_message = "所选 %d 个网格 / %d 个物理组 / 隐藏 %d 个 / %d 个源资源 / %d 个切换组" % (
                 len(plan["objects"]), len(physics), len(plan["hidden"]),
-                len(plan["sources"]), len(plan["groups"]))
+                len(plan["sources"]), sum(
+                    bool(set(switch_members(group)) & set(meshes))
+                    for group in switch_groups(context.scene)))
             self.scope_message += " / LOD: " + (
                 ",".join(str(level) for level in levels) or "无")
         except ValueError as error:
@@ -3918,6 +3895,7 @@ class EIEM_OT_export(ExportHelper, bpy.types.Operator):
 
     def draw(self, context):
         self.layout.label(text=self.scope_message)
+        self.layout.prop(self, "include_switches")
         draw_lod_options(self.layout, self)
         self.layout.label(text="仅处理所选资源；相机关写入游戏显隐状态")
 
@@ -3930,7 +3908,7 @@ class EIEM_OT_export(ExportHelper, bpy.types.Operator):
                 mesh_objects=meshes,
                 armatures=rigs,
                 physics_objects=selected_eiem_physics(context),
-                lod_levels=levels)
+                lod_levels=levels, include_switches=self.include_switches)
             self.report(
                 {'INFO'},
                 "Exported %(meshes)d Mesh, %(materials)d Material, "

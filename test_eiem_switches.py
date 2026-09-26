@@ -209,12 +209,39 @@ for p in payloads:
     assert p["bone_paths"] == ["Root", "Tip", "Unused"]
     assert len(p["skin"]) == p["vertex_count"]
 
+# Export checkbox off keeps the authored default appearance and shape sliders,
+# without exporting any key bindings. It does not change the saved project.
+static_package = output / "without-switches"
+assert bpy.ops.eiem.export_package.get_rna_type().properties[
+    "include_switches"].default is True
+assert addon.export_package(static_package, selected, [],
+                            include_switches=False)["meshes"] == 1
+static_ini = (static_package / "mod.ini").read_text(encoding="utf-8")
+assert "[KeySwitch" not in static_ini and "[KeyShape" not in static_ini
+assert "[KeyModUI]" not in static_ini and "$switch_" not in static_ini
+assert "submesh_visible." not in static_ini
+assert "[ShapeControl" in static_ini and "shape." in static_ini
+assert "imgui.SliderFloat" in (static_package / "ui.lua").read_text(encoding="utf-8")
+assert len(addon.plan_switch_export(selected)["groups"]) == 2
+
+# The off option must also allow an intentionally unused/invalid key binding.
+acc_group["eiem_key"] = "Ctrl+Ctrl+F7"
+assert addon.export_package(output / "without-keys", selected, [],
+                            include_switches=False)["meshes"] == 1
+acc_group["eiem_key"] = "F7"
+
 # Preview state is never export selection: default off still exports geometry.
 empty_state = next(state for state in addon.switch_states(top_group)
                    if state.name == "款式 2")
 addon.set_switch_default(top_group, empty_state)
 addon.preview_switch(top_group, empty_state)
 addon.export_package(output / "default-off", selected, [])
+default_static = addon.plan_switch_export(selected, include_switches=False)
+assert top in default_static["hidden"] and variant in default_static["hidden"]
+addon.export_package(output / "default-off-static", selected, [],
+                     include_switches=False)
+assert "[KeySwitch" not in (output / "default-off-static/mod.ini").read_text(
+    encoding="utf-8")
 addon.set_switch_default(top_group, addon.switch_states(top_group)[0])
 
 # Validation errors must leave a previously working package untouched.

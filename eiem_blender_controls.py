@@ -472,7 +472,7 @@ def mesh_source_identity(obj):
             source.replace("\\", "/").lower(), asset.lower())
 
 
-def plan_switch_export(mesh_objects, scene=None):
+def plan_switch_export(mesh_objects, scene=None, include_switches=True):
     """Plan exactly the selected objects; visibility is an explicit action."""
     scene = scene or bpy.context.scene
     selected = set(mesh_objects)
@@ -502,13 +502,22 @@ def plan_switch_export(mesh_objects, scene=None):
         if group not in used_groups:
             continue
         states = switch_states(group)
-        if len(states) < 2:
+        if include_switches and len(states) < 2:
             raise ValueError(
                 "切换组 %s 至少需要两个状态（允许空状态）" % group.name)
         defaults = [index for index, state in enumerate(states)
                     if state.get("eiem_default")]
         if len(defaults) != 1:
             raise ValueError("请为切换组 %s 指定一个初始状态" % group.name)
+        if not include_switches:
+            for obj in switch_members(group):
+                if obj not in selected or obj in hidden:
+                    continue
+                if len(memberships.get(obj, [])) != 1:
+                    raise ValueError("网格 %s 同时属于多个切换组" % obj.name)
+                if obj not in switch_meshes(states[defaults[0]]):
+                    hidden.add(obj)
+            continue
         key = validate_switch_key(group.get("eiem_key", ""))
         if key in keys:
             raise ValueError("导出的多个切换组使用同一快捷键：" + key)
@@ -549,7 +558,7 @@ def plan_switch_export(mesh_objects, scene=None):
     }
 
 
-def plan_shape_controls(objects):
+def plan_shape_controls(objects, include_hotkeys=True):
     declarations = []
     bindings = {}
     hotkeys = []
@@ -591,6 +600,8 @@ def plan_shape_controls(objects):
                     "\r", " ").replace("\n", " ")
                 declarations.append((variable, label, *values))
                 actions.append("shape.%s=%s" % (channel_name, variable))
+                if not include_hotkeys:
+                    continue
                 configured_hotkeys = [
                     ("增加", str(getattr(
                         control, "hotkey_increase", "")).strip(), maximum),
@@ -630,11 +641,12 @@ def lua_string(value):
     ) + '"'
 
 
-def generate_mod_ui(groups, shape_controls, shape_hotkeys=None, scene=None):
+def generate_mod_ui(groups, shape_controls, shape_hotkeys=None, scene=None,
+                    include_hotkeys=True):
     scene = scene or bpy.context.scene
     shape_hotkeys = shape_hotkeys or []
     key = (validate_switch_key(scene.eiem_ui_key)
-           if scene.eiem_ui_key.strip() else "")
+           if include_hotkeys and scene.eiem_ui_key.strip() else "")
     if any(key == group[3] for group in groups):
         raise ValueError("Mod UI 开关键与切换组按键重复，请修改 UI 开关键")
     if any(key == control["key"] for control in shape_hotkeys):

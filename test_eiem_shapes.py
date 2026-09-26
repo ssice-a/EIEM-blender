@@ -127,6 +127,14 @@ try:
 except ValueError:
     pass
 assert not (output / "bad/mod.ini").exists()
+obj.data.shape_keys.use_relative = True
+stale_ui = output / "stale-ui"
+addon.export_package(stale_ui, [obj], [])
+assert (stale_ui / "ui.lua").exists()
+bpy.context.scene.eiem_ui_template = False
+addon.export_package(stale_ui, [obj], [], include_switches=False)
+assert not (stale_ui / "ui.lua").exists()
+assert "[UIMod]" not in (stale_ui / "mod.ini").read_text(encoding="utf-8")
 addon.unregister()
 addon.register()
 assert obj.data.eiem_shape_controls[0].shape == "Inflate"
